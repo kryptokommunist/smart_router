@@ -16,12 +16,11 @@ import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import hashlib
-import threading
 
 # Configuration
 GEMINI_API_KEY = "AIzaSyDw2hF98LRpKTs64VoO6HrKXVzeSHDSJk4"
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-SERVER_PORT = 2050
+SERVER_PORT = 2051
 NDS_INTERFACE = "br-lan"
 
 # Session storage (in-memory, cleared on restart)
@@ -143,6 +142,7 @@ def call_gemini(conversation_history):
 def grant_access(mac, duration_minutes):
     """Grant internet access to a MAC address using ndsctl."""
     try:
+        # ndsctl auth <mac> <timeout_seconds>
         cmd = ["ndsctl", "auth", mac, str(duration_minutes * 60)]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode == 0:
@@ -181,10 +181,16 @@ def get_client_mac(ip):
 
 
 class GatekeeperHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for the captive portal."""
+    """HTTP request handler for the gatekeeper API."""
 
     def log_message(self, format, *args):
         log(f"HTTP: {args[0]}")
+
+    def send_cors_headers(self):
+        """Send CORS headers to allow cross-origin requests."""
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def send_html(self, html, status=200):
         self.send_response(status)
@@ -197,42 +203,28 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_cors_headers()
         self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
 
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
+        self.send_response(200)
+        self.send_cors_headers()
+        self.end_headers()
+
     def do_GET(self):
-        client_ip = self.client_address[0]
-
-        # Parse query parameters from NDS redirect
-        parsed = urllib.parse.urlparse(self.path)
-        params = urllib.parse.parse_qs(parsed.query)
-
-        # Get or create session
-        mac = params.get("clientmac", [get_client_mac(client_ip)])[0]
-        if mac:
-            mac = mac.upper().replace("-", ":")
-
-        session_id = None
-        for sid, sess in sessions.items():
-            if sess["ip"] == client_ip:
-                session_id = sid
-                break
-
-        if not session_id and mac:
-            session_id = generate_session_id(mac or "unknown", client_ip)
-            sessions[session_id] = {
-                "mac": mac,
-                "ip": client_ip,
-                "history": [],
-                "questions_asked": 0
-            }
-
-        # Serve splash page
-        self.serve_splash_page(session_id)
+        """Handle GET requests - serve status page."""
+        self.send_json({"status": "ok", "service": "gatekeeper"})
 
     def do_POST(self):
+        """Handle POST requests - API endpoints."""
         client_ip = self.client_address[0]
+
+        # Parse path
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/")
 
         # Rate limiting
         if not check_rate_limit(client_ip):
@@ -244,23 +236,92 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length).decode("utf-8")
 
         try:
-            data = json.loads(body)
+            data = json.loads(body) if body else {}
         except json.JSONDecodeError:
             self.send_json({"status": "error", "message": "Invalid request"}, 400)
             return
 
+        # Route to appropriate handler
+        if path == "/init":
+            self.handle_init(data, client_ip)
+        elif path == "/chat":
+            self.handle_chat(data, client_ip)
+        else:
+            # Default: treat as chat if session_id present
+            if data.get("session_id") or data.get("mac"):
+                self.handle_chat(data, client_ip)
+            else:
+                self.handle_init(data, client_ip)
+
+    def handle_init(self, data, client_ip):
+        """Initialize a new session."""
+        mac = data.get("mac", "")
+        ip = data.get("ip", client_ip)
+
+        # Clean up MAC address
+        if mac:
+            mac = mac.upper().replace("-", ":")
+        else:
+            mac = get_client_mac(ip) or ""
+
+        # Check if session already exists for this MAC/IP
+        for sid, sess in sessions.items():
+            if sess["mac"] == mac or sess["ip"] == ip:
+                self.send_json({"status": "ok", "session_id": sid})
+                return
+
+        # Create new session
+        session_id = generate_session_id(mac or "unknown", ip)
+        sessions[session_id] = {
+            "mac": mac,
+            "ip": ip,
+            "history": [],
+            "questions_asked": 0
+        }
+
+        log(f"New session: {session_id[:8]}... for MAC={mac}, IP={ip}")
+        self.send_json({"status": "ok", "session_id": session_id})
+
+    def handle_chat(self, data, client_ip):
+        """Handle chat message and LLM interaction."""
         session_id = data.get("session_id")
         message = data.get("message", "").strip()
+        mac = data.get("mac", "")
+        ip = data.get("ip", client_ip)
 
-        if not session_id or session_id not in sessions:
-            self.send_json({"status": "error", "message": "Invalid session. Please refresh the page."}, 400)
-            return
+        # Clean up MAC
+        if mac:
+            mac = mac.upper().replace("-", ":")
+
+        # Find or create session
+        session = None
+        if session_id and session_id in sessions:
+            session = sessions[session_id]
+        else:
+            # Try to find by MAC or IP
+            for sid, sess in sessions.items():
+                if (mac and sess["mac"] == mac) or sess["ip"] == ip:
+                    session_id = sid
+                    session = sess
+                    break
+
+        # Create session if not found
+        if not session:
+            if not mac:
+                mac = get_client_mac(ip) or ""
+            session_id = generate_session_id(mac or "unknown", ip)
+            session = {
+                "mac": mac,
+                "ip": ip,
+                "history": [],
+                "questions_asked": 0
+            }
+            sessions[session_id] = session
+            log(f"Auto-created session: {session_id[:8]}... for MAC={mac}, IP={ip}")
 
         if not message:
-            self.send_json({"status": "error", "message": "Please provide a reason."}, 400)
+            self.send_json({"status": "error", "message": "Please provide a reason.", "session_id": session_id}, 400)
             return
-
-        session = sessions[session_id]
 
         # Add user message to history
         session["history"].append({"role": "user", "content": message})
@@ -278,35 +339,21 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
                 response = call_gemini(session["history"])
 
         if response.get("status") == "approved":
-            mac = session["mac"]
+            mac_addr = session["mac"]
             duration = min(response.get("duration", 10), 120)  # Cap at 120 minutes
 
-            if mac and grant_access(mac, duration):
+            if mac_addr and grant_access(mac_addr, duration):
                 response["granted"] = True
+                log(f"Access approved for {mac_addr}: {duration} minutes")
             else:
+                log(f"Failed to grant access for MAC={mac_addr}")
                 response = {"status": "error", "message": "Failed to grant access. Please contact admin."}
 
+        elif response.get("status") == "denied":
+            log(f"Access denied for {session['mac']}: {response.get('message', 'No reason')}")
+
+        response["session_id"] = session_id
         self.send_json(response)
-
-    def serve_splash_page(self, session_id):
-        """Serve the captive portal splash page."""
-        try:
-            with open("/etc/nodogsplash/htdocs/splash.html", "r") as f:
-                html = f.read()
-                html = html.replace("{{SESSION_ID}}", session_id or "")
-                html = html.replace("{{SERVER_PORT}}", str(SERVER_PORT))
-        except FileNotFoundError:
-            html = f"""<!DOCTYPE html>
-<html>
-<head><title>Internet Access</title></head>
-<body>
-<h1>Gatekeeper Active</h1>
-<p>Session: {session_id}</p>
-<p>Splash page not found. Please contact administrator.</p>
-</body>
-</html>"""
-
-        self.send_html(html)
 
 
 def enable_gatekeeper():

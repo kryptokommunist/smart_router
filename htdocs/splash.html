@@ -229,9 +229,21 @@
     </div>
 
     <script>
-        const SESSION_ID = "{{SESSION_ID}}";
-        const SERVER_PORT = "{{SERVER_PORT}}";
-        const API_URL = `http://${window.location.hostname}:${SERVER_PORT}/`;
+        // Parse NDS parameters from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const clientMac = urlParams.get('clientmac') || urlParams.get('mac') || '';
+        const clientIp = urlParams.get('clientip') || urlParams.get('ip') || '';
+        const gatewayName = urlParams.get('gatewayname') || 'Gatekeeper';
+        const tok = urlParams.get('tok') || '';
+        const redir = urlParams.get('redir') || '';
+
+        // API URL - use gateway IP for server
+        const SERVER_PORT = 2051;
+        const GATEWAY_IP = '192.168.8.1';
+        const API_URL = `http://${GATEWAY_IP}:${SERVER_PORT}/`;
+
+        // Session ID generated from MAC+timestamp
+        let sessionId = null;
 
         function updateTime() {
             const now = new Date();
@@ -259,21 +271,49 @@
             document.getElementById('inputArea').classList.add('hidden');
         }
 
+        async function initSession() {
+            try {
+                const response = await fetch(API_URL + 'init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        mac: clientMac,
+                        ip: clientIp,
+                        tok: tok
+                    })
+                });
+                const data = await response.json();
+                if (data.session_id) {
+                    sessionId = data.session_id;
+                }
+            } catch (error) {
+                console.error('Failed to init session:', error);
+            }
+        }
+
         async function sendMessage() {
             const input = document.getElementById('userInput');
             const message = input.value.trim();
             if (!message) return;
+
+            // Initialize session on first message if not done
+            if (!sessionId) {
+                await initSession();
+            }
 
             addMessage(message, 'user');
             input.value = '';
             setLoading(true);
 
             try {
-                const response = await fetch(API_URL, {
+                const response = await fetch(API_URL + 'chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        session_id: SESSION_ID,
+                        session_id: sessionId,
+                        mac: clientMac,
+                        ip: clientIp,
+                        tok: tok,
                         message: message
                     })
                 });
@@ -282,16 +322,26 @@
 
                 setLoading(false);
 
+                // Update session ID if returned
+                if (data.session_id) {
+                    sessionId = data.session_id;
+                }
+
                 if (data.status === 'question') {
                     addMessage(data.message, 'assistant');
                 } else if (data.status === 'approved') {
                     addMessage(`Access Granted for ${data.duration} minutes!`, 'approved');
                     addMessage(data.message, 'assistant');
-                    addMessage('You can now use the internet. This page will close in 5 seconds...', 'system');
+                    addMessage('You can now use the internet. Redirecting...', 'system');
                     disableInput();
+                    // Redirect to original destination or connectivity check
                     setTimeout(() => {
-                        window.location.href = 'http://www.gstatic.com/generate_204';
-                    }, 5000);
+                        if (redir) {
+                            window.location.href = redir;
+                        } else {
+                            window.location.href = 'http://www.gstatic.com/generate_204';
+                        }
+                    }, 3000);
                 } else if (data.status === 'denied') {
                     addMessage('Access Denied', 'denied');
                     addMessage(data.message, 'assistant');
@@ -304,6 +354,9 @@
                 addMessage(`Connection error: ${error.message}. Please try again.`, 'system');
             }
         }
+
+        // Initialize session on page load
+        initSession();
     </script>
 </body>
 </html>
