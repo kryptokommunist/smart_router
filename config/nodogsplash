@@ -1,0 +1,51 @@
+# Nodogsplash configuration for LLM Gatekeeper
+# Location: /etc/config/nodogsplash
+
+config nodogsplash
+    # Enable nodogsplash
+    option enabled '1'
+
+    # Network interface to manage (LAN bridge)
+    option gatewayinterface 'br-lan'
+
+    # Gateway name shown to clients
+    option gatewayname 'LLM Gatekeeper'
+
+    # Redirect to our Python gatekeeper server
+    option fasport '2050'
+    option fasremoteip '192.168.8.1'
+    option faspath '/'
+
+    # Authentication settings
+    # Session timeout - 0 means must be authenticated
+    option sessiontimeout '0'
+
+    # Idle timeout - disconnect after 2 hours of inactivity
+    option authidletimeout '7200'
+
+    # Pre-authentication timeout (seconds to complete auth)
+    option preauthidletimeout '300'
+
+    # Traffic control (optional - set to 0 for no limit)
+    option uploadrate '0'
+    option downloadrate '0'
+
+    # Maximum clients
+    option maxclients '250'
+
+    # Debug level (0=silent, 1=info, 2=debug, 3=verbose)
+    option debuglevel '1'
+
+    # FAS (Forward Authentication Service) settings
+    # Use our Python server for authentication
+    option fas_secure_enabled '0'
+
+# Authenticated users list - allow LAN access but require auth for WAN
+config authenticated_users
+    list users_to_router 'allow all'
+
+# Preauthenticated users - allow DNS and gatekeeper port before auth
+config preauthenticated_users
+    list preauthenticated_users 'allow tcp port 53'
+    list preauthenticated_users 'allow udp port 53'
+    list preauthenticated_users 'allow tcp port 2050'

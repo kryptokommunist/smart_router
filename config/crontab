@@ -1,0 +1,8 @@
+# Gatekeeper cron jobs for GL-MT3000
+# Append these entries to /etc/crontabs/root
+
+# Enable gatekeeper mode at 9 PM (captive portal active)
+0 21 * * * /usr/bin/python3 /root/gatekeeper.py --mode gatekeeper 2>&1 | logger -t gatekeeper-cron
+
+# Disable gatekeeper at 5 AM (open internet access)
+0 5 * * * /usr/bin/python3 /root/gatekeeper.py --mode open 2>&1 | logger -t gatekeeper-cron
