@@ -894,56 +894,13 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        """Handle GET requests - serve splash page or success page."""
-        parsed = urllib.parse.urlparse(self.path)
-        host = self.headers.get("Host", "")
+        """Handle GET requests - serve splash page.
 
-        # Handle captive portal detection URLs
-        is_captive_check = (
-            "captive.apple.com" in host or
-            "hotspot-detect" in self.path or
-            "generate_204" in self.path or
-            "connectivitycheck" in host or
-            "msftconnecttest" in host or
-            "detectportal" in host
-        )
-
-        # If network is authenticated, return success for captive checks
-        if is_network_authenticated():
-            if is_captive_check or "apple.com" in host:
-                # Return Apple's expected success response
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>")
-                return
-            # For other requests, redirect to Google's check
-            self.send_response(302)
-            self.send_header("Location", "http://connectivitycheck.gstatic.com/generate_204")
-            self.end_headers()
-            return
-
-        # Network NOT authenticated - must show captive portal
-        # For captive detection URLs, return a redirect to trigger portal
-        if is_captive_check:
-            # Return a non-success response to trigger captive portal UI
-            self.send_response(302)
-            self.send_header("Location", f"http://{GATEWAY_IP}:{SERVER_PORT}/splash")
-            self.end_headers()
-            return
-
-        # Success endpoint - only works if authenticated
-        if parsed.path == "/success":
-            if is_network_authenticated():
-                self.send_success_page()
-            else:
-                # Not authenticated, redirect to splash
-                self.send_response(302)
-                self.send_header("Location", f"http://{GATEWAY_IP}:{SERVER_PORT}/splash")
-                self.end_headers()
-            return
-
-        # Serve splash page for all other requests
+        Note: When network access is granted, DNS hijacking and HTTP redirect
+        are disabled, so traffic goes directly to the internet and never
+        reaches this server.
+        """
+        # All GET requests get the splash page (we're in captive portal mode)
         self.send_html(SPLASH_HTML)
 
     def send_success_page(self):
