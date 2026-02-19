@@ -16,6 +16,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from datetime import datetime
 import hashlib
 
@@ -871,6 +872,7 @@ def is_network_authenticated():
 
 class GatekeeperHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the captive portal."""
+    timeout = 30  # Socket timeout in seconds
 
     def log_message(self, format, *args):
         log(f"HTTP: {args[0]}")
@@ -1161,14 +1163,19 @@ def expiry_checker_thread():
             log(f"Error in expiry checker: {e}")
 
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP server that handles each request in a separate thread."""
+    daemon_threads = True  # Don't wait for threads on shutdown
+
+
 def run_server():
     """Run the HTTP server."""
     # Start background thread for expiry checking
     expiry_thread = threading.Thread(target=expiry_checker_thread, daemon=True)
     expiry_thread.start()
 
-    server = HTTPServer(("0.0.0.0", SERVER_PORT), GatekeeperHandler)
-    log(f"Gatekeeper server running on port {SERVER_PORT}")
+    server = ThreadedHTTPServer(("0.0.0.0", SERVER_PORT), GatekeeperHandler)
+    log(f"Gatekeeper server running on port {SERVER_PORT} (threaded)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
