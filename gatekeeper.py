@@ -472,9 +472,13 @@ function sendMessage() {
                     var expiryStr = expiry.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'});
                     addMessage('Access Granted for ' + data.duration + ' minutes!', 'approved');
                     addMessage(data.message, 'assistant');
-                    addMessage('Internet access expires at ' + expiryStr + '. Close this window to browse.', 'system');
+                    addMessage('Internet access expires at ' + expiryStr, 'system');
                     disableInput();
-                    // Don't redirect - macOS will auto-detect connectivity and show Done button
+                    // Redirect to our success page which returns Apple's exact success HTML
+                    // This triggers the "Done" button in macOS/iOS Captive Network Assistant
+                    setTimeout(function() {
+                        window.location.href = '/success';
+                    }, 2000);
                 } else if (data.status === 'denied') {
                     addMessage('Access Denied', 'denied');
                     addMessage(data.message, 'assistant');
@@ -890,13 +894,25 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        """Handle GET requests - serve splash page.
+        """Handle GET requests - serve splash page or success page."""
+        parsed = urllib.parse.urlparse(self.path)
 
-        Note: When network access is granted, DNS hijacking and HTTP redirect
-        are disabled, so traffic goes directly to the internet and never
-        reaches this server.
-        """
-        # All GET requests get the splash page (we're in captive portal mode)
+        # Success endpoint - returns Apple's exact success HTML to dismiss CNA
+        if parsed.path == "/success":
+            # Apple's CNA looks for exactly this content to show "Done" button
+            success_html = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+<HEAD>
+<TITLE>Success</TITLE>
+</HEAD>
+<BODY>
+Success
+</BODY>
+</HTML>"""
+            self.send_html(success_html)
+            return
+
+        # All other GET requests get the splash page
         self.send_html(SPLASH_HTML)
 
     def send_success_page(self):
