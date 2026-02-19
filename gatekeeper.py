@@ -104,9 +104,16 @@ def get_request_history_for_context():
 
     return history_text
 
-SYSTEM_PROMPT = """You are a gatekeeper AI controlling internet access during nighttime hours (9pm-5am).
+SYSTEM_PROMPT = """You are a loving, caring gatekeeper helping manage internet access during nighttime hours (9pm-5am).
 
-Your role is to evaluate whether someone has a legitimate reason to access the internet right now, or if they should wait until morning.
+Think of yourself as a warm, supportive parent who genuinely cares about the person's wellbeing. You want them to get good sleep because you know how important rest is for their health, happiness, and success. At the same time, you understand that sometimes life has urgent demands that can't wait.
+
+## Your tone:
+- Warm and kind, like a loving parent
+- Express genuine care ("I want to make sure you get enough rest tonight")
+- Be encouraging ("I know you can handle this!" or "That sounds important, let me help")
+- Acknowledge their feelings ("I understand this feels urgent")
+- But maintain firm, clear boundaries - sleep matters!
 
 ## Access Rules:
 - 10 minutes: Quick check that can't wait, would cause stress if delayed
@@ -114,41 +121,41 @@ Your role is to evaluate whether someone has a legitimate reason to access the i
 - Up to 120 minutes: Video calls, Zoom meetings, voice calls
 
 ## Your behavior:
-1. ALWAYS ask the user how much time they need (in minutes)
+1. ALWAYS ask how much time they need (in minutes) - warmly, not like an interrogation
 2. If they request MORE than 10 minutes:
-   a. Ask them to justify why they need that specific amount of time
-   b. REQUIRE them to upload proof (screenshot, email, document, calendar invite, etc.)
-   c. When they upload an image, carefully examine it to verify their claim
+   a. Kindly ask them to explain why they need that specific amount
+   b. Gently request proof (screenshot, email, document, calendar invite)
+   c. When they upload an image, review it thoughtfully
 3. You may ask up to 3 clarifying questions total
-4. Be understanding but firm - most things CAN wait until morning
-5. Mindless browsing, social media, entertainment = DENY
+4. Most things CAN wait until morning - and that's actually better for them!
+5. Mindless browsing, social media, entertainment = DENY (with love and care)
 6. Legitimate work/emergency = APPROVE with appropriate duration
 
 ## Proof verification (for requests >10 minutes):
 - When the user uploads an image, analyze it carefully
 - Check if the image actually supports their stated reason
 - Look for: email subject/content, due dates, calendar invites, assignment details
-- Be suspicious of generic or irrelevant images
-- If the image doesn't match their claim, DENY access
-- If no proof is provided for >10 minutes, ask: "Please upload a screenshot as proof (email, calendar, assignment, etc.)"
+- Be thoughtful about generic or irrelevant images
+- If the image doesn't match their claim, kindly explain why you can't approve
+- If no proof is provided for >10 minutes, ask warmly: "Could you share a screenshot? An email, calendar invite, or assignment would help me understand the urgency."
 
-## Conversation flow:
-1. First, understand what they need to do
-2. Ask: "How many minutes do you need?"
-3. If >10 minutes:
-   - Ask: "Why do you need [X] minutes specifically?"
-   - Then say: "Please upload a screenshot as proof (email showing deadline, calendar invite, etc.)"
-4. Verify the proof image matches their claim
-5. Then make your decision
+## Consider timing patterns:
+- Look at previous requests from tonight (shown in context)
+- If someone has already been on multiple times, be extra gentle but firm
+- Acknowledge patterns: "I see you've been up working tonight - I hope you can rest soon!"
 
 ## Response format:
 If you need clarification or proof, respond with:
-{"status": "question", "message": "Your clarifying question or request for proof"}
+{"status": "question", "message": "Your warm, caring question"}
 
 If you're ready to decide, respond with:
-{"status": "approved", "duration": <minutes>, "message": "Brief explanation"}
+{"status": "approved", "duration": <minutes>, "message": "Warm approval with encouragement"}
 or
-{"status": "denied", "message": "Brief explanation of why they should wait"}
+{"status": "denied", "message": "Kind, caring explanation of why rest is better right now"}
+
+Example denial tone: "I know it feels important right now, but this can wait until morning. Your sleep tonight will help you tackle it better tomorrow. Sweet dreams!"
+
+Example approval tone: "I understand - that deadline is real and you need to get this done. Here's 45 minutes. I'm proud of you for being responsible about your work. Try to rest after!"
 
 IMPORTANT: Always respond with valid JSON only. No markdown, no extra text."""
 
@@ -332,7 +339,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     </div>
     <div class="chat-container" id="chatContainer">
         <div class="message assistant" id="initialMessage">
-            Hi! Why do you need internet access right now? I'll evaluate if it's urgent enough.
+            Hey there! It's getting late and I want to make sure you get good rest tonight. What brings you here - is there something that really can't wait until morning?
         </div>
     </div>
     <div class="loading" id="loading">
@@ -370,7 +377,7 @@ function updateTime() {
     // Update initial message with actual time
     var initialMsg = document.getElementById('initialMessage');
     if (initialMsg) {
-        initialMsg.textContent = "Hi! It's " + timeStr + ". Why do you need internet access right now? I'll evaluate if it's urgent enough.";
+        initialMsg.textContent = "Hey there! It's " + timeStr + " - getting late! I want to make sure you get good rest tonight. What brings you here - is there something that really can't wait until morning?";
     }
 }
 updateTime();
@@ -643,7 +650,14 @@ def _call_gemini_internal(conversation_history):
     contents = [{"role": "user", "parts": [{"text": system_with_context}]}]
     contents.append({"role": "model", "parts": [{"text": "I understand. I will evaluate internet access requests, require proof for >10 minutes, and respond in JSON format only."}]})
 
-    for msg in conversation_history:
+    # Only include actual image data for the most recent message that has an image
+    # For older messages, just reference that an image was shown
+    last_image_idx = -1
+    for i, msg in enumerate(conversation_history):
+        if msg.get("image"):
+            last_image_idx = i
+
+    for idx, msg in enumerate(conversation_history):
         role = "user" if msg["role"] == "user" else "model"
         parts = []
 
@@ -651,23 +665,28 @@ def _call_gemini_internal(conversation_history):
         if msg.get("content"):
             parts.append({"text": msg["content"]})
 
-        # Handle image content (base64 data URL)
+        # Handle image content - only send actual image data for the most recent image
         if msg.get("image"):
-            image_data = msg["image"]
-            # Parse data URL: data:image/jpeg;base64,/9j/4AAQ...
-            if image_data.startswith("data:"):
-                try:
-                    header, base64_data = image_data.split(",", 1)
-                    # Extract mime type from header like "data:image/jpeg;base64"
-                    mime_type = header.split(":")[1].split(";")[0]
-                    parts.append({
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": base64_data
-                        }
-                    })
-                except (ValueError, IndexError) as e:
-                    log(f"Failed to parse image data URL: {e}")
+            if idx == last_image_idx:
+                # This is the most recent image - send actual data
+                image_data = msg["image"]
+                # Parse data URL: data:image/jpeg;base64,/9j/4AAQ...
+                if image_data.startswith("data:"):
+                    try:
+                        header, base64_data = image_data.split(",", 1)
+                        # Extract mime type from header like "data:image/jpeg;base64"
+                        mime_type = header.split(":")[1].split(";")[0]
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": base64_data
+                            }
+                        })
+                    except (ValueError, IndexError) as e:
+                        log(f"Failed to parse image data URL: {e}")
+            else:
+                # Older image - just add a text reference
+                parts.append({"text": "(Previously uploaded image - already reviewed)"})
 
         if parts:
             contents.append({"role": role, "parts": parts})
