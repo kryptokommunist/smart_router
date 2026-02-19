@@ -346,7 +346,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
         <label>
             <span class="upload-btn">📷 Attach Proof</span>
             <span>Screenshot, email, document</span>
-            <input type="file" id="imageInput" accept="image/*">
+            <input type="file" id="imageInput" accept="image/*" capture="environment">
         </label>
         <div class="image-preview" id="imagePreview">
             <img id="previewImg" src="" alt="Preview">
@@ -472,12 +472,13 @@ function sendMessage() {
                     var expiryStr = expiry.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'});
                     addMessage('Access Granted for ' + data.duration + ' minutes!', 'approved');
                     addMessage(data.message, 'assistant');
-                    addMessage('Your internet access expires at ' + expiryStr + '. Redirecting...', 'system');
+                    addMessage('Your internet access expires at ' + expiryStr + '. You can close this window.', 'system');
                     disableInput();
-                    // Redirect to success page after a short delay to show the messages
+                    // Redirect to Apple's captive portal success URL after delay
+                    // This signals to macOS/iOS that authentication is complete
                     setTimeout(function() {
-                        window.location.href = '/success';
-                    }, 2000);
+                        window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+                    }, 3000);
                 } else if (data.status === 'denied') {
                     addMessage('Access Denied', 'denied');
                     addMessage(data.message, 'assistant');
