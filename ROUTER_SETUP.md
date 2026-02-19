@@ -110,15 +110,17 @@ ssh root@192.168.0.2 "/etc/init.d/gatekeeper enable"
 The init script auto-detects day/night on startup. For mid-session transitions, add cron jobs:
 
 ```bash
-ssh root@192.168.0.2 'cat >> /etc/crontabs/root << "EOF"
+ssh root@192.168.0.2 'cat > /etc/crontabs/root << "EOF"
 # Gatekeeper mode switching
-0 21 * * * /etc/init.d/gatekeeper restart
-0 5 * * * /etc/init.d/gatekeeper restart
+0 21 * * * . /root/gatekeeper.secrets && export GEMINI_API_KEY && /usr/bin/python3 /root/gatekeeper.py --mode gatekeeper 2>&1 | logger -t gatekeeper-cron
+0 5 * * * /usr/bin/python3 /root/gatekeeper.py --mode open 2>&1 | logger -t gatekeeper-cron
 EOF'
 
 # Restart cron
 ssh root@192.168.0.2 "/etc/init.d/cron restart"
 ```
+
+**Note**: The 9pm cron job sources the API key from `/root/gatekeeper.secrets` before starting gatekeeper mode.
 
 ## Step 6: Start and Verify
 
