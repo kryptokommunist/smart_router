@@ -7,6 +7,7 @@ Standalone captive portal with Gemini AI justification for nighttime internet ac
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -21,11 +22,13 @@ import hashlib
 # Configuration
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent"
+GEMINI_HOST = "generativelanguage.googleapis.com"
 SERVER_PORT = 2050  # Use port 2050 for captive portal
 API_PORT = 2051   # API port for chat
 GATEWAY_IP = "192.168.8.1"
 LAN_INTERFACE = "br-lan"
 REQUEST_LOG_FILE = "/tmp/gatekeeper_requests.json"  # Persistent log for the night
+EXTERNAL_DNS = "8.8.8.8"  # Use Google DNS to bypass local DNS hijacking
 
 # Network-wide access (single exemption for entire network)
 network_access_expiry = None  # timestamp when access expires, None = blocked
@@ -541,8 +544,85 @@ def check_rate_limit(ip):
     return True
 
 
+def resolve_host_external(hostname, dns_server=EXTERNAL_DNS):
+    """Resolve hostname using external DNS to bypass local DNS hijacking."""
+    try:
+        # Use dig/nslookup via subprocess to query external DNS
+        result = subprocess.run(
+            ["nslookup", hostname, dns_server],
+            capture_output=True, text=True, timeout=5
+        )
+        # Parse nslookup output for IP address
+        for line in result.stdout.split("\n"):
+            if "Address" in line and dns_server not in line and "#" not in line:
+                parts = line.split()
+                for part in parts:
+                    # Check if it looks like an IPv4 address
+                    if part.count(".") == 3 and all(p.isdigit() for p in part.split(".")):
+                        return part
+    except Exception as e:
+        log(f"External DNS resolution failed: {e}")
+    return None
+
+
+# Cache for resolved Gemini IP (avoid repeated DNS lookups)
+_gemini_ip_cache = {"ip": None, "expires": 0}
+
+
+def get_gemini_ip():
+    """Get Gemini API IP address, using cache or external DNS resolution."""
+    global _gemini_ip_cache
+    now = time.time()
+
+    # Return cached IP if still valid (cache for 5 minutes)
+    if _gemini_ip_cache["ip"] and now < _gemini_ip_cache["expires"]:
+        return _gemini_ip_cache["ip"]
+
+    # Resolve using external DNS
+    ip = resolve_host_external(GEMINI_HOST)
+    if ip:
+        _gemini_ip_cache = {"ip": ip, "expires": now + 300}
+        log(f"Resolved {GEMINI_HOST} -> {ip} via external DNS")
+        return ip
+
+    # Fallback: try system resolver (might work if DNS hijacking not active)
+    try:
+        ip = socket.gethostbyname(GEMINI_HOST)
+        if ip != GATEWAY_IP:  # Make sure it's not the hijacked response
+            _gemini_ip_cache = {"ip": ip, "expires": now + 300}
+            return ip
+    except Exception:
+        pass
+
+    return None
+
+
 def call_gemini(conversation_history):
     """Call Gemini API with conversation history (supports multimodal with images)."""
+    # Resolve Gemini IP to bypass DNS hijacking
+    gemini_ip = get_gemini_ip()
+    if not gemini_ip:
+        log("Failed to resolve Gemini API hostname")
+        return {"status": "error", "message": "Failed to resolve API server. Please try again."}
+
+    # Temporarily patch DNS resolution to return our resolved IP
+    original_getaddrinfo = socket.getaddrinfo
+
+    def patched_getaddrinfo(host, port, *args, **kwargs):
+        if host == GEMINI_HOST:
+            # Return our externally-resolved IP
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (gemini_ip, port))]
+        return original_getaddrinfo(host, port, *args, **kwargs)
+
+    socket.getaddrinfo = patched_getaddrinfo
+    try:
+        return _call_gemini_internal(conversation_history)
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+
+
+def _call_gemini_internal(conversation_history):
+    """Internal Gemini API call (DNS already patched)."""
     url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
 
     # Get current date/time context
@@ -721,9 +801,9 @@ def grant_network_access(duration_minutes, requesting_mac):
                        "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
                       capture_output=True, check=False)
 
-        # Remove the HTTP redirect rule
+        # Remove the HTTP redirect rule (ALL port 80 traffic, including to gateway)
         subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_INTERFACE,
-                       "-p", "tcp", "--dport", "80", "!", "-d", GATEWAY_IP,
+                       "-p", "tcp", "--dport", "80",
                        "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
                       capture_output=True, check=False)
 
@@ -754,9 +834,9 @@ def revoke_network_access():
                        "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
                       check=False)
 
-        # Re-add the HTTP redirect rule
+        # Re-add the HTTP redirect rule (ALL port 80 traffic, including to gateway)
         subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", LAN_INTERFACE,
-                       "-p", "tcp", "--dport", "80", "!", "-d", GATEWAY_IP,
+                       "-p", "tcp", "--dport", "80",
                        "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
                       check=False)
 
@@ -1005,9 +1085,9 @@ def setup_firewall():
     # Clean up any old rules first
     teardown_firewall()
 
-    # Simple approach: redirect ALL HTTP from LAN to our portal (except to gateway itself)
+    # Redirect ALL HTTP from LAN to our portal (including to gateway IP for DNS hijacking)
     subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", LAN_INTERFACE,
-                   "-p", "tcp", "--dport", "80", "!", "-d", GATEWAY_IP,
+                   "-p", "tcp", "--dport", "80",
                    "-j", "REDIRECT", "--to-port", str(SERVER_PORT)], check=False)
 
     # Block all forwarding from LAN to WAN (internet) - MUST be at position 1 to be before ESTABLISHED rule
@@ -1032,9 +1112,9 @@ def teardown_firewall():
     network_access_expiry = None
     network_access_granted_by = None
 
-    # Remove HTTP redirect
+    # Remove HTTP redirect (ALL port 80 traffic, including to gateway)
     subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_INTERFACE,
-                   "-p", "tcp", "--dport", "80", "!", "-d", GATEWAY_IP,
+                   "-p", "tcp", "--dport", "80",
                    "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
                   capture_output=True, check=False)
     # Remove forward block
