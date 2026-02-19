@@ -472,13 +472,9 @@ function sendMessage() {
                     var expiryStr = expiry.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'});
                     addMessage('Access Granted for ' + data.duration + ' minutes!', 'approved');
                     addMessage(data.message, 'assistant');
-                    addMessage('Your internet access expires at ' + expiryStr + '. You can close this window.', 'system');
+                    addMessage('Internet access expires at ' + expiryStr + '. Close this window to browse.', 'system');
                     disableInput();
-                    // Redirect to Apple's captive portal success URL after delay
-                    // This signals to macOS/iOS that authentication is complete
-                    setTimeout(function() {
-                        window.location.href = 'http://captive.apple.com/hotspot-detect.html';
-                    }, 3000);
+                    // Don't redirect - macOS will auto-detect connectivity and show Done button
                 } else if (data.status === 'denied') {
                     addMessage('Access Denied', 'denied');
                     addMessage(data.message, 'assistant');
