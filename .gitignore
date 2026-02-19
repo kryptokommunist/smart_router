@@ -14,3 +14,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Secrets
+*.secrets
+gatekeeper.secrets
+
+# Claude local settings
+.claude/settings.local.json

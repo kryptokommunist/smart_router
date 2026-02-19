@@ -8,11 +8,35 @@ STOP=10
 USE_PROCD=1
 PROG=/root/gatekeeper.py
 
+# Load API key from secrets file
+. /root/gatekeeper.secrets 2>/dev/null || true
+
+is_nighttime() {
+    # Returns 0 (true) if between 9pm (21:00) and 5am (05:00)
+    HOUR=$(date +%H)
+    if [ "$HOUR" -ge 21 ] || [ "$HOUR" -lt 5 ]; then
+        return 0
+    fi
+    return 1
+}
+
 start_service() {
     logger -t gatekeeper "Starting gatekeeper service"
 
     procd_open_instance
-    procd_set_param command /usr/bin/python3 "$PROG" --server
+
+    # Pass API key as environment variable
+    procd_set_param env GEMINI_API_KEY="$GEMINI_API_KEY"
+
+    # Determine mode based on time of day
+    if is_nighttime; then
+        logger -t gatekeeper "Nighttime detected - starting in gatekeeper mode"
+        procd_set_param command /usr/bin/python3 -u "$PROG" --mode gatekeeper
+    else
+        logger -t gatekeeper "Daytime detected - starting in server-only mode (no blocking)"
+        procd_set_param command /usr/bin/python3 -u "$PROG" --server
+    fi
+
     procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-5}
     procd_set_param stdout 1
     procd_set_param stderr 1
@@ -22,6 +46,7 @@ start_service() {
 
 stop_service() {
     logger -t gatekeeper "Stopping gatekeeper service"
+    /usr/bin/python3 "$PROG" --mode open 2>/dev/null || true
 }
 
 reload_service() {
