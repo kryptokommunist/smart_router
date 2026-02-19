@@ -136,13 +136,15 @@ ssh root@192.168.0.2 "python3 /root/gatekeeper.py --server"
 
 ## How the AI Decides
 
-The gatekeeper AI follows these guidelines:
+The gatekeeper AI acts like a **warm, loving parent** - genuinely caring about your wellbeing while maintaining firm boundaries. It wants you to get good sleep because rest matters for your health and success.
 
-1. **Always asks** how much time you need
-2. **For >10 minutes**: Requires justification AND proof (screenshot)
+### Behavior
+1. **Warmly asks** how much time you need
+2. **For >10 minutes**: Kindly requests justification AND proof (screenshot)
 3. **Analyzes uploaded images** to verify claims match reality
 4. **Can ask up to 3 clarifying questions** before deciding
-5. **Tracks request history** throughout the night (patterns matter)
+5. **Tracks request history** with timestamps - patterns and timing matter
+6. **Only sends images once** to the AI (not re-referenced in follow-up messages)
 
 ### What Gets Approved
 - Urgent work emails with deadlines
@@ -150,11 +152,13 @@ The gatekeeper AI follows these guidelines:
 - Scheduled video calls
 - Quick checks that cause stress if delayed
 
-### What Gets Denied
+### What Gets Denied (with care!)
 - "Just want to browse"
 - Social media, entertainment
 - Vague claims without proof
 - Repeated requests for the same reason
+
+Example denial: *"I know it feels important right now, but this can wait until morning. Your sleep tonight will help you tackle it better tomorrow. Sweet dreams!"*
 
 ## Blog Post
 
