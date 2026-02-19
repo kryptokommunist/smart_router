@@ -344,10 +344,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
         <button type="button" id="sendBtn">Send</button>
     </div>
     <div class="image-upload" id="imageUpload">
-        <label>
+        <label id="uploadLabel">
             <span class="upload-btn">📷 Attach Proof</span>
             <span>Screenshot, email, document</span>
-            <input type="file" id="imageInput" accept="image/*" capture="environment">
+            <input type="file" id="imageInput" accept="image/*">
         </label>
         <div class="image-preview" id="imagePreview">
             <img id="previewImg" src="" alt="Preview">
