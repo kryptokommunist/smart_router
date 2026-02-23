@@ -283,6 +283,17 @@ def resolve_domain_ips(domain):
     return ips
 
 
+DOH_SERVERS = [
+    "8.8.8.8", "8.8.4.4",           # Google DNS
+    "1.1.1.1", "1.0.0.1",           # Cloudflare DNS
+    "9.9.9.9", "149.112.112.112",   # Quad9
+    "208.67.222.222", "208.67.220.220",  # OpenDNS
+    "185.228.168.168", "185.228.169.168",  # CleanBrowsing
+    "76.76.19.19", "76.223.122.150",  # Alternate DNS
+    "94.140.14.14", "94.140.15.15",  # AdGuard DNS
+]
+
+
 def enable_focus_mode(duration_minutes):
     """Enable focus mode - block distracting sites via DNS and IP."""
     global focus_mode_active, focus_mode_expiry, focus_mode_blocked_ips
@@ -293,6 +304,14 @@ def enable_focus_mode(duration_minutes):
     focus_mode_active = True
     focus_mode_expiry = time.time() + (duration_minutes * 60)
     focus_mode_blocked_ips = set()
+
+    # Block IPv6 entirely to prevent bypass (YouTube etc use IPv6)
+    subprocess.run(["ip6tables", "-I", "FORWARD", "1", "-j", "REJECT"], check=False)
+
+    # Block DNS-over-HTTPS servers to prevent bypass
+    for doh_ip in DOH_SERVERS:
+        subprocess.run(["iptables", "-I", "FORWARD", "1", "-d", doh_ip, "-p", "tcp", "--dport", "443", "-j", "REJECT"], check=False)
+        subprocess.run(["iptables", "-I", "FORWARD", "1", "-d", doh_ip, "-p", "udp", "--dport", "443", "-j", "REJECT"], check=False)
 
     # Block each domain via DNS (dnsmasq) and collect IPs for firewall
     for domain in domains:
@@ -311,7 +330,7 @@ def enable_focus_mode(duration_minutes):
     for ip in focus_mode_blocked_ips:
         subprocess.run(["iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "REJECT"], check=False)
 
-    log(f"Focus mode enabled, blocked {len(focus_mode_blocked_ips)} IPs")
+    log(f"Focus mode enabled, blocked {len(focus_mode_blocked_ips)} IPs + DoH servers + IPv6")
 
     # Log to permanent history
     entry = {
@@ -337,6 +356,17 @@ def disable_focus_mode():
 
     domains = get_focus_domains()
 
+    # Remove IPv6 block
+    subprocess.run(["ip6tables", "-D", "FORWARD", "-j", "REJECT"],
+                  capture_output=True, check=False)
+
+    # Remove DoH server blocks
+    for doh_ip in DOH_SERVERS:
+        subprocess.run(["iptables", "-D", "FORWARD", "-d", doh_ip, "-p", "tcp", "--dport", "443", "-j", "REJECT"],
+                      capture_output=True, check=False)
+        subprocess.run(["iptables", "-D", "FORWARD", "-d", doh_ip, "-p", "udp", "--dport", "443", "-j", "REJECT"],
+                      capture_output=True, check=False)
+
     # Remove DNS blocks
     for domain in domains:
         subprocess.run(["uci", "del_list", f"dhcp.@dnsmasq[0].address=/{domain}/0.0.0.0"],
@@ -346,10 +376,19 @@ def disable_focus_mode():
     subprocess.run(["uci", "commit", "dhcp"], check=False)
     subprocess.run(["/etc/init.d/dnsmasq", "restart"], check=False)
 
-    # Remove IP blocks from firewall
-    for ip in focus_mode_blocked_ips:
-        subprocess.run(["iptables", "-D", "FORWARD", "-d", ip, "-j", "REJECT"],
-                      capture_output=True, check=False)
+    # Remove IP blocks from firewall - re-resolve domains to get IPs
+    # (in case focus_mode_blocked_ips is empty after restart)
+    ips_to_unblock = set(focus_mode_blocked_ips)
+    for domain in domains:
+        ips_to_unblock.update(resolve_domain_ips(domain))
+
+    for ip in ips_to_unblock:
+        # Try multiple times since there might be duplicate rules
+        for _ in range(5):
+            result = subprocess.run(["iptables", "-D", "FORWARD", "-d", ip, "-j", "REJECT"],
+                                   capture_output=True, check=False)
+            if result.returncode != 0:
+                break
 
     focus_mode_active = False
     focus_mode_expiry = None
