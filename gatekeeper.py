@@ -192,7 +192,8 @@ def save_to_permanent_log(entry):
     entries = load_permanent_log()
     entries.append(entry)
     save_permanent_log(entries)
-    log(f"Saved to permanent log: {entry['timestamp']} - {entry['reason'][:50]}...")
+    desc = entry.get('reason', entry.get('type', 'unknown'))[:50]
+    log(f"Saved to permanent log: {entry['timestamp']} - {desc}...")
 
 
 def check_and_trim_log():
@@ -311,6 +312,17 @@ def enable_focus_mode(duration_minutes):
         subprocess.run(["iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "REJECT"], check=False)
 
     log(f"Focus mode enabled, blocked {len(focus_mode_blocked_ips)} IPs")
+
+    # Log to permanent history
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": "focus_mode",
+        "duration": duration_minutes,
+        "domains_blocked": len(domains)
+    }
+    check_and_trim_log()
+    save_to_permanent_log(entry)
+
     return True
 
 
@@ -372,6 +384,17 @@ def enable_voluntary_lockdown(duration_minutes, reason, exceptions):
     setup_firewall()
 
     log(f"Voluntary lockdown enabled until {datetime.fromtimestamp(voluntary_lockdown_expiry).strftime('%H:%M')}")
+
+    # Log to permanent history
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": "voluntary_lockdown",
+        "duration": duration_minutes,
+        "reason": reason[:200]
+    }
+    check_and_trim_log()
+    save_to_permanent_log(entry)
+
     return True
 
 
@@ -429,22 +452,34 @@ def get_stats():
     """Calculate statistics from permanent log."""
     entries = load_permanent_log()
 
-    # Separate approved and denied
-    approved_entries = [e for e in entries if e.get("status") == "approved"]
-    denied_entries = [e for e in entries if e.get("status") == "denied"]
+    # Separate by type
+    nighttime_entries = [e for e in entries if e.get("status") in ("approved", "denied")]
+    focus_entries = [e for e in entries if e.get("type") == "focus_mode"]
+    lockdown_entries = [e for e in entries if e.get("type") == "voluntary_lockdown"]
 
+    # Nighttime stats
+    approved_entries = [e for e in nighttime_entries if e.get("status") == "approved"]
+    denied_entries = [e for e in nighttime_entries if e.get("status") == "denied"]
     total_approved = len(approved_entries)
     total_denied = len(denied_entries)
     total_minutes = sum(e.get("duration", 0) for e in approved_entries)
+
+    # Focus mode stats
+    total_focus = len(focus_entries)
+    total_focus_minutes = sum(e.get("duration", 0) for e in focus_entries)
+
+    # Voluntary lockdown stats
+    total_lockdown = len(lockdown_entries)
+    total_lockdown_minutes = sum(e.get("duration", 0) for e in lockdown_entries)
 
     # Recent entries (last 20)
     recent = entries[-20:] if entries else []
     recent.reverse()  # Most recent first
 
-    # Time distribution data for chart (separate approved/denied)
+    # Time distribution data for nighttime chart (9pm-5am)
     time_distribution_approved = []
     time_distribution_denied = []
-    for entry in entries:
+    for entry in nighttime_entries:
         try:
             ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
             hour = ts.hour + ts.minute / 60.0  # Decimal hour
@@ -457,11 +492,11 @@ def get_stats():
         except (ValueError, TypeError):
             pass
 
-    # Weekday distribution
+    # Weekday distribution for nighttime
     weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     weekday_approved = [0] * 7
     weekday_denied = [0] * 7
-    for entry in entries:
+    for entry in nighttime_entries:
         try:
             ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
             weekday = ts.weekday()  # 0=Monday, 6=Sunday
@@ -472,15 +507,63 @@ def get_stats():
         except (ValueError, TypeError):
             pass
 
+    # Time distribution for daytime modes (5am-9pm)
+    time_distribution_focus = []
+    for entry in focus_entries:
+        try:
+            ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
+            hour = ts.hour + ts.minute / 60.0
+            duration = entry.get("duration", 30)
+            time_distribution_focus.append({"hour": hour, "duration": duration})
+        except (ValueError, TypeError):
+            pass
+
+    time_distribution_lockdown = []
+    for entry in lockdown_entries:
+        try:
+            ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
+            hour = ts.hour + ts.minute / 60.0
+            duration = entry.get("duration", 30)
+            time_distribution_lockdown.append({"hour": hour, "duration": duration})
+        except (ValueError, TypeError):
+            pass
+
+    # Weekday distribution for daytime modes
+    weekday_focus = [0] * 7
+    weekday_lockdown = [0] * 7
+    for entry in focus_entries:
+        try:
+            ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
+            weekday_focus[ts.weekday()] += 1
+        except (ValueError, TypeError):
+            pass
+    for entry in lockdown_entries:
+        try:
+            ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
+            weekday_lockdown[ts.weekday()] += 1
+        except (ValueError, TypeError):
+            pass
+
     return {
+        # Nighttime stats
         "total_approved": total_approved,
         "total_denied": total_denied,
         "total_minutes": total_minutes,
-        "recent": recent,
         "time_distribution_approved": time_distribution_approved,
         "time_distribution_denied": time_distribution_denied,
         "weekday_approved": weekday_approved,
         "weekday_denied": weekday_denied,
+        # Daytime stats
+        "total_focus": total_focus,
+        "total_focus_minutes": total_focus_minutes,
+        "total_lockdown": total_lockdown,
+        "total_lockdown_minutes": total_lockdown_minutes,
+        "time_distribution_focus": time_distribution_focus,
+        "time_distribution_lockdown": time_distribution_lockdown,
+        "weekday_focus": weekday_focus,
+        "weekday_lockdown": weekday_lockdown,
+        # Common
+        "recent": recent,
         "weekday_names": weekday_names
     }
 
@@ -963,26 +1046,26 @@ body {{
 .back-link:hover {{ text-decoration: underline; }}
 .stats-cards {{
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 15px;
     margin-bottom: 30px;
 }}
 .stat-card {{
     background: {card_bg};
     backdrop-filter: blur(10px);
     border-radius: 15px;
-    padding: 25px;
+    padding: 20px;
     text-align: center;
     border: 1px solid {border_color};
 }}
 .stat-card .number {{
-    font-size: 2.5rem;
+    font-size: 2rem;
     font-weight: 700;
     color: {accent_color};
     margin-bottom: 5px;
 }}
 .stat-card .label {{
-    font-size: 0.9rem;
+    font-size: 0.8rem;
     color: {muted_color};
 }}
 .chart-section {{
@@ -993,10 +1076,37 @@ body {{
     margin-bottom: 30px;
     border: 1px solid {border_color};
 }}
+.chart-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}}
 .chart-section h2 {{
     font-size: 1.2rem;
-    margin-bottom: 20px;
     color: {heading_color};
+    margin: 0;
+}}
+.tab-buttons {{
+    display: flex;
+    gap: 5px;
+}}
+.tab-btn {{
+    padding: 6px 12px;
+    border: none;
+    border-radius: 8px;
+    background: {chart_bg};
+    color: {muted_color};
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}}
+.tab-btn:hover {{
+    background: {border_color};
+}}
+.tab-btn.active {{
+    background: {accent_color};
+    color: #fff;
 }}
 .chart-container {{
     position: relative;
@@ -1005,6 +1115,12 @@ body {{
     background: {chart_bg};
     border-radius: 10px;
     padding: 40px 50px 40px 60px;
+}}
+.chart-panel {{
+    display: none;
+}}
+.chart-panel.active {{
+    display: block;
 }}
 .chart-svg {{
     width: 100%;
@@ -1031,6 +1147,12 @@ body {{
 .data-point.denied {{
     fill: #ff6b6b;
 }}
+.data-point.focus {{
+    fill: #f39c12;
+}}
+.data-point.lockdown {{
+    fill: #9b59b6;
+}}
 .data-point:hover {{
     opacity: 1;
     filter: brightness(1.2);
@@ -1043,6 +1165,12 @@ body {{
 }}
 .bar.denied {{
     fill: #ff6b6b;
+}}
+.bar.focus {{
+    fill: #f39c12;
+}}
+.bar.lockdown {{
+    fill: #9b59b6;
 }}
 .bar:hover {{
     opacity: 1;
@@ -1067,10 +1195,10 @@ body {{
 .history-table td {{
     padding: 12px 10px;
     text-align: left;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid {border_color};
 }}
 .history-table th {{
-    color: #a0a0a0;
+    color: {muted_color};
     font-weight: 500;
     font-size: 0.85rem;
 }}
@@ -1088,8 +1216,6 @@ body {{
 }}
 .duration-badge {{
     display: inline-block;
-    background: rgba(74, 105, 189, 0.2);
-    color: #4a69bd;
     padding: 4px 10px;
     border-radius: 10px;
     font-size: 0.85rem;
@@ -1102,13 +1228,27 @@ body {{
     background: rgba(255, 107, 107, 0.2);
     color: #ff6b6b;
 }}
+.duration-badge.focus_mode {{
+    background: rgba(243, 156, 18, 0.2);
+    color: #f39c12;
+}}
+.duration-badge.voluntary_lockdown {{
+    background: rgba(155, 89, 182, 0.2);
+    color: #9b59b6;
+}}
 .stat-card .number.denied {{
     color: #ff6b6b;
+}}
+.stat-card .number.focus {{
+    color: #f39c12;
+}}
+.stat-card .number.lockdown {{
+    color: #9b59b6;
 }}
 .empty-state {{
     text-align: center;
     padding: 40px;
-    color: #a0a0a0;
+    color: {muted_color};
 }}
 @media (max-width: 600px) {{
     .history-table th:nth-child(2),
@@ -1121,6 +1261,14 @@ body {{
     .chart-container {{
         padding: 30px 40px 30px 50px;
     }}
+    .chart-header {{
+        flex-direction: column;
+        gap: 10px;
+        align-items: flex-start;
+    }}
+    .stats-cards {{
+        grid-template-columns: repeat(3, 1fr);
+    }}
 }}
 </style>
 </head>
@@ -1129,7 +1277,7 @@ body {{
     <a href="/" class="back-link">&larr; Back to Portal</a>
     <div class="header">
         <h1>Open Sesame Stats</h1>
-        <p>Exception history across all sessions</p>
+        <p>Activity history across all sessions</p>
     </div>
     <div class="stats-cards">
         <div class="stat-card">
@@ -1142,26 +1290,84 @@ body {{
         </div>
         <div class="stat-card">
             <div class="number">{total_hours}</div>
-            <div class="label">Hours Granted</div>
+            <div class="label">Night Hours</div>
+        </div>
+        <div class="stat-card">
+            <div class="number focus">{total_focus}</div>
+            <div class="label">Focus Sessions</div>
+        </div>
+        <div class="stat-card">
+            <div class="number lockdown">{total_lockdown}</div>
+            <div class="label">Lockdowns</div>
+        </div>
+        <div class="stat-card">
+            <div class="number">{total_daytime_hours}</div>
+            <div class="label">Day Hours</div>
         </div>
     </div>
     <div class="chart-section">
-        <h2>Time Distribution</h2>
-        <div class="chart-container">
-            {time_chart}
+        <div class="chart-header">
+            <h2>Time Distribution</h2>
+            <div class="tab-buttons">
+                <button class="tab-btn active" onclick="showTimeTab('night')">Night</button>
+                <button class="tab-btn" onclick="showTimeTab('day')">Day</button>
+            </div>
+        </div>
+        <div id="time-night" class="chart-panel active">
+            <div class="chart-container">
+                {time_chart_night}
+            </div>
+        </div>
+        <div id="time-day" class="chart-panel">
+            <div class="chart-container">
+                {time_chart_day}
+            </div>
         </div>
     </div>
     <div class="chart-section">
-        <h2>Requests by Weekday</h2>
-        <div class="chart-container" style="height: 200px;">
-            {weekday_chart}
+        <div class="chart-header">
+            <h2>Requests by Weekday</h2>
+            <div class="tab-buttons">
+                <button class="tab-btn active" onclick="showWeekdayTab('night')">Night</button>
+                <button class="tab-btn" onclick="showWeekdayTab('day')">Day</button>
+            </div>
+        </div>
+        <div id="weekday-night" class="chart-panel active">
+            <div class="chart-container" style="height: 200px;">
+                {weekday_chart_night}
+            </div>
+        </div>
+        <div id="weekday-day" class="chart-panel">
+            <div class="chart-container" style="height: 200px;">
+                {weekday_chart_day}
+            </div>
         </div>
     </div>
     <div class="recent-section">
-        <h2>Recent Requests</h2>
+        <h2>Recent Activity</h2>
         {history_table}
     </div>
 </div>
+<script>
+function showTimeTab(tab) {{
+    document.querySelectorAll('#time-night, #time-day').forEach(function(el) {{
+        el.classList.remove('active');
+    }});
+    document.getElementById('time-' + tab).classList.add('active');
+    var btns = document.querySelectorAll('.chart-section:nth-of-type(1) .tab-btn');
+    btns.forEach(function(btn) {{ btn.classList.remove('active'); }});
+    event.target.classList.add('active');
+}}
+function showWeekdayTab(tab) {{
+    document.querySelectorAll('#weekday-night, #weekday-day').forEach(function(el) {{
+        el.classList.remove('active');
+    }});
+    document.getElementById('weekday-' + tab).classList.add('active');
+    var btns = document.querySelectorAll('.chart-section:nth-of-type(2) .tab-btn');
+    btns.forEach(function(btn) {{ btn.classList.remove('active'); }});
+    event.target.classList.add('active');
+}}
+</script>
 </body>
 </html>"""
 
@@ -2293,6 +2499,141 @@ def render_weekday_chart(weekday_approved, weekday_denied, weekday_names):
         # Day label
         svg_parts.append(f'<text class="axis-label" x="{x_center}" y="{height - 5}" text-anchor="middle">{day}</text>')
 
+    # Legend
+    svg_parts.append(f'<rect class="bar approved" x="{width - 100}" y="8" width="12" height="12"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 85}" y="18">Approved</text>')
+    svg_parts.append(f'<rect class="bar denied" x="{width - 100}" y="24" width="12" height="12"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 85}" y="34">Denied</text>')
+
+    svg_parts.append('</svg>')
+    return '\n'.join(svg_parts)
+
+
+def render_daytime_chart(focus_data, lockdown_data):
+    """Render SVG scatter plot for daytime modes (5am-9pm)."""
+    if not focus_data and not lockdown_data:
+        return '<div class="empty-state">No daytime mode data yet</div>'
+
+    # Chart dimensions (viewBox coordinates)
+    width = 500
+    height = 200
+    padding_left = 45
+    padding_bottom = 45
+    padding_top = 10
+    padding_right = 10
+
+    chart_width = width - padding_left - padding_right
+    chart_height = height - padding_top - padding_bottom
+
+    # Time axis: 5:00 to 21:00 (5am to 9pm) - 16 hour span
+    def hour_to_x(hour):
+        normalized = hour - 5  # 5->0, 21->16
+        return padding_left + (normalized / 16) * chart_width
+
+    # Duration axis: 0-480 minutes (8 hours max)
+    max_duration = 480
+    def duration_to_y(duration):
+        return height - padding_bottom - (min(duration, max_duration) / max_duration) * chart_height
+
+    # Build SVG
+    svg_parts = [f'<svg class="chart-svg" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet">']
+
+    # Grid lines (horizontal for duration)
+    for dur in [60, 120, 240, 480]:
+        y = duration_to_y(dur)
+        label = f"{dur // 60}h" if dur >= 60 else f"{dur}m"
+        svg_parts.append(f'<line class="grid-line" x1="{padding_left}" y1="{y}" x2="{width - padding_right}" y2="{y}"/>')
+        svg_parts.append(f'<text class="axis-label" x="{padding_left - 5}" y="{y + 4}" text-anchor="end">{label}</text>')
+
+    # X-axis labels (time)
+    time_labels = [(5, "5am"), (9, "9am"), (13, "1pm"), (17, "5pm"), (21, "9pm")]
+    for hour, label in time_labels:
+        x = hour_to_x(hour)
+        svg_parts.append(f'<text class="axis-label" x="{x}" y="{height - padding_bottom + 18}" text-anchor="middle">{label}</text>')
+
+    # Axis titles
+    svg_parts.append(f'<text class="axis-title" x="{width / 2}" y="{height - 5}" text-anchor="middle">Time of Day</text>')
+    svg_parts.append(f'<text class="axis-title" x="12" y="{(height - padding_bottom) / 2 + padding_top}" text-anchor="middle" transform="rotate(-90, 12, {(height - padding_bottom) / 2 + padding_top})">Duration</text>')
+
+    # Focus mode data points (orange)
+    for point in focus_data:
+        hour = point['hour']
+        duration = point['duration']
+        if 5 <= hour < 21:
+            x = hour_to_x(hour)
+            y = duration_to_y(duration)
+            r = 4 + (duration / 480) * 8
+            svg_parts.append(f'<circle class="data-point focus" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}"><title>Focus {int(hour)}:{int((hour % 1) * 60):02d} - {duration} min</title></circle>')
+
+    # Lockdown data points (purple)
+    for point in lockdown_data:
+        hour = point['hour']
+        duration = point['duration']
+        if 5 <= hour < 21:
+            x = hour_to_x(hour)
+            y = duration_to_y(duration)
+            r = 4 + (duration / 480) * 8
+            svg_parts.append(f'<circle class="data-point lockdown" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}"><title>Lockdown {int(hour)}:{int((hour % 1) * 60):02d} - {duration} min</title></circle>')
+
+    # Legend
+    svg_parts.append(f'<circle class="data-point focus" cx="{width - 80}" cy="15" r="5"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 70}" y="19">Focus</text>')
+    svg_parts.append(f'<circle class="data-point lockdown" cx="{width - 80}" cy="30" r="5"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 70}" y="34">Lockdown</text>')
+
+    svg_parts.append('</svg>')
+    return '\n'.join(svg_parts)
+
+
+def render_daytime_weekday_chart(weekday_focus, weekday_lockdown, weekday_names):
+    """Render SVG bar chart for daytime modes per weekday."""
+    max_count = max(max(weekday_focus), max(weekday_lockdown), 1)
+
+    # Chart dimensions
+    width = 500
+    height = 150
+    padding_left = 35
+    padding_bottom = 25
+    padding_top = 10
+    padding_right = 10
+
+    chart_width = width - padding_left - padding_right
+    chart_height = height - padding_top - padding_bottom
+    bar_width = chart_width / 7 * 0.35
+    gap = chart_width / 7
+
+    svg_parts = [f'<svg class="chart-svg" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet">']
+
+    # Grid lines
+    for i in range(1, 5):
+        y_val = max_count * i / 4
+        y = height - padding_bottom - (i / 4) * chart_height
+        svg_parts.append(f'<line class="grid-line" x1="{padding_left}" y1="{y}" x2="{width - padding_right}" y2="{y}"/>')
+        svg_parts.append(f'<text class="axis-label" x="{padding_left - 5}" y="{y + 4}" text-anchor="end">{int(y_val)}</text>')
+
+    # Bars for each day
+    for i, day in enumerate(weekday_names):
+        x_center = padding_left + gap * i + gap / 2
+
+        # Focus bar (orange)
+        focus_height = (weekday_focus[i] / max_count) * chart_height if max_count > 0 else 0
+        if focus_height > 0:
+            svg_parts.append(f'<rect class="bar focus" x="{x_center - bar_width - 1}" y="{height - padding_bottom - focus_height}" width="{bar_width}" height="{focus_height}"><title>{day}: {weekday_focus[i]} focus</title></rect>')
+
+        # Lockdown bar (purple)
+        lockdown_height = (weekday_lockdown[i] / max_count) * chart_height if max_count > 0 else 0
+        if lockdown_height > 0:
+            svg_parts.append(f'<rect class="bar lockdown" x="{x_center + 1}" y="{height - padding_bottom - lockdown_height}" width="{bar_width}" height="{lockdown_height}"><title>{day}: {weekday_lockdown[i]} lockdown</title></rect>')
+
+        # Day label
+        svg_parts.append(f'<text class="axis-label" x="{x_center}" y="{height - 5}" text-anchor="middle">{day}</text>')
+
+    # Legend
+    svg_parts.append(f'<rect class="bar focus" x="{width - 100}" y="8" width="12" height="12"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 85}" y="18">Focus</text>')
+    svg_parts.append(f'<rect class="bar lockdown" x="{width - 100}" y="24" width="12" height="12"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 85}" y="34">Lockdown</text>')
+
     svg_parts.append('</svg>')
     return '\n'.join(svg_parts)
 
@@ -2301,19 +2642,29 @@ def render_stats_page():
     """Render the stats HTML page with current data."""
     stats = get_stats()
 
-    # Format total hours
+    # Format hours
     total_hours = f"{stats['total_minutes'] / 60:.1f}"
+    total_daytime_hours = f"{(stats['total_focus_minutes'] + stats['total_lockdown_minutes']) / 60:.1f}"
 
-    # Build time chart (approved and denied)
-    time_chart = render_time_chart(
+    # Build nighttime charts
+    time_chart_night = render_time_chart(
         stats.get('time_distribution_approved', []),
         stats.get('time_distribution_denied', [])
     )
-
-    # Build weekday chart
-    weekday_chart = render_weekday_chart(
+    weekday_chart_night = render_weekday_chart(
         stats.get('weekday_approved', [0]*7),
         stats.get('weekday_denied', [0]*7),
+        stats.get('weekday_names', ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+    )
+
+    # Build daytime charts
+    time_chart_day = render_daytime_chart(
+        stats.get('time_distribution_focus', []),
+        stats.get('time_distribution_lockdown', [])
+    )
+    weekday_chart_day = render_daytime_weekday_chart(
+        stats.get('weekday_focus', [0]*7),
+        stats.get('weekday_lockdown', [0]*7),
         stats.get('weekday_names', ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
     )
 
@@ -2322,15 +2673,28 @@ def render_stats_page():
         rows = []
         for entry in stats['recent']:
             timestamp = entry.get('timestamp', 'Unknown')
-            reason = entry.get('reason', 'Unknown')[:80]
-            status = entry.get('status', 'approved')
+            entry_type = entry.get('type', '')
+            status = entry.get('status', '')
             duration = entry.get('duration', 0)
-            status_class = 'approved' if status == 'approved' else 'denied'
-            duration_text = f'{duration} min' if status == 'approved' else 'Denied'
+
+            # Determine display based on entry type
+            if entry_type == 'focus_mode':
+                reason = 'Focus Mode'
+                badge_class = 'focus_mode'
+                duration_text = f'{duration} min'
+            elif entry_type == 'voluntary_lockdown':
+                reason = entry.get('reason', 'Lockdown')[:80]
+                badge_class = 'voluntary_lockdown'
+                duration_text = f'{duration} min'
+            else:
+                reason = entry.get('reason', 'Unknown')[:80]
+                badge_class = 'approved' if status == 'approved' else 'denied'
+                duration_text = f'{duration} min' if status == 'approved' else 'Denied'
+
             rows.append(f"""<tr>
                 <td>{timestamp}</td>
-                <td class="reason-cell" title="{entry.get('reason', '')}">{reason}</td>
-                <td><span class="duration-badge {status_class}">{duration_text}</span></td>
+                <td class="reason-cell" title="{entry.get('reason', reason)}">{reason}</td>
+                <td><span class="duration-badge {badge_class}">{duration_text}</span></td>
             </tr>""")
         history_table = f"""<table class="history-table">
             <thead>
@@ -2341,15 +2705,20 @@ def render_stats_page():
             </tbody>
         </table>"""
     else:
-        history_table = '<div class="empty-state">No exceptions recorded yet</div>'
+        history_table = '<div class="empty-state">No activity recorded yet</div>'
 
     theme = get_theme_vars()
     return STATS_HTML.format(
         total_approved=stats['total_approved'],
         total_denied=stats['total_denied'],
         total_hours=total_hours,
-        time_chart=time_chart,
-        weekday_chart=weekday_chart,
+        total_focus=stats['total_focus'],
+        total_lockdown=stats['total_lockdown'],
+        total_daytime_hours=total_daytime_hours,
+        time_chart_night=time_chart_night,
+        time_chart_day=time_chart_day,
+        weekday_chart_night=weekday_chart_night,
+        weekday_chart_day=weekday_chart_day,
         history_table=history_table,
         **theme
     )
