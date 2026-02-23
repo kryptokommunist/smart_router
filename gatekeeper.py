@@ -168,10 +168,22 @@ def get_stats():
     recent = entries[-20:] if entries else []
     recent.reverse()  # Most recent first
 
+    # Time distribution data for chart
+    time_distribution = []
+    for entry in entries:
+        try:
+            ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
+            hour = ts.hour + ts.minute / 60.0  # Decimal hour
+            duration = entry.get("duration", 10)
+            time_distribution.append({"hour": hour, "duration": duration})
+        except (ValueError, TypeError):
+            pass
+
     return {
         "total_exceptions": total_exceptions,
         "total_minutes": total_minutes,
-        "recent": recent
+        "recent": recent,
+        "time_distribution": time_distribution
     }
 
 
@@ -676,6 +688,51 @@ body {{
     font-size: 0.9rem;
     color: #a0a0a0;
 }}
+.chart-section {{
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(10px);
+    border-radius: 15px;
+    padding: 25px;
+    margin-bottom: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.chart-section h2 {{
+    font-size: 1.2rem;
+    margin-bottom: 20px;
+    color: #fff;
+}}
+.chart-container {{
+    position: relative;
+    width: 100%;
+    height: 250px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 10px;
+    padding: 40px 50px 40px 60px;
+}}
+.chart-svg {{
+    width: 100%;
+    height: 100%;
+}}
+.axis-label {{
+    fill: #a0a0a0;
+    font-size: 11px;
+}}
+.axis-title {{
+    fill: #a0a0a0;
+    font-size: 12px;
+}}
+.grid-line {{
+    stroke: rgba(255, 255, 255, 0.1);
+    stroke-width: 1;
+}}
+.data-point {{
+    fill: #4a69bd;
+    opacity: 0.7;
+}}
+.data-point:hover {{
+    opacity: 1;
+    filter: brightness(1.2);
+}}
 .recent-section {{
     background: rgba(255, 255, 255, 0.05);
     backdrop-filter: blur(10px);
@@ -736,6 +793,9 @@ body {{
     .reason-cell {{
         max-width: 150px;
     }}
+    .chart-container {{
+        padding: 30px 40px 30px 50px;
+    }}
 }}
 </style>
 </head>
@@ -756,6 +816,12 @@ body {{
             <div class="label">Total Hours Granted</div>
         </div>
     </div>
+    <div class="chart-section">
+        <h2>Time Distribution</h2>
+        <div class="chart-container">
+            {time_chart}
+        </div>
+    </div>
     <div class="recent-section">
         <h2>Recent Exceptions</h2>
         {history_table}
@@ -763,6 +829,234 @@ body {{
 </div>
 </body>
 </html>"""
+
+DAYTIME_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gatekeeper Chat</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    color: #e4e4e4;
+}
+.container {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(10px);
+    border-radius: 20px;
+    padding: 30px;
+    max-width: 500px;
+    width: 100%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.header { text-align: center; margin-bottom: 25px; position: relative; }
+.header h1 { font-size: 1.5rem; margin-bottom: 8px; color: #fff; }
+.stats-link {
+    position: absolute;
+    top: 0;
+    right: 0;
+    font-size: 0.8rem;
+    color: #a0a0a0;
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    transition: background 0.2s;
+}
+.stats-link:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.time-badge {
+    display: inline-block;
+    background: rgba(46, 213, 115, 0.2);
+    color: #2ed573;
+    padding: 5px 15px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+}
+.header p { margin-top: 15px; font-size: 0.95rem; color: #a0a0a0; line-height: 1.5; }
+.chat-container {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 15px;
+    padding: 15px;
+    margin-bottom: 20px;
+    max-height: 350px;
+    overflow-y: auto;
+}
+.message {
+    margin-bottom: 12px;
+    padding: 12px 15px;
+    border-radius: 12px;
+    max-width: 85%;
+    line-height: 1.4;
+}
+.message.user { background: #4a69bd; margin-left: auto; border-bottom-right-radius: 4px; }
+.message.assistant { background: rgba(255, 255, 255, 0.1); margin-right: auto; border-bottom-left-radius: 4px; }
+.message.system { background: rgba(255, 193, 7, 0.15); color: #ffc107; text-align: center; max-width: 100%; font-size: 0.9rem; }
+.input-area { display: flex; gap: 10px; }
+textarea {
+    flex: 1;
+    padding: 15px;
+    border: none;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    font-size: 1rem;
+    resize: none;
+    height: 60px;
+    font-family: inherit;
+}
+textarea:focus { outline: 2px solid #4a69bd; }
+textarea::placeholder { color: #666; }
+button {
+    padding: 15px 25px;
+    border: none;
+    border-radius: 12px;
+    background: #4a69bd;
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+    font-weight: 500;
+}
+button:hover:not(:disabled) { background: #3c5aa6; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.loading { display: none; text-align: center; padding: 15px; }
+.loading.active { display: block; }
+.spinner {
+    width: 30px; height: 30px;
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top-color: #4a69bd;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 10px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <a href="/stats" class="stats-link">Stats</a>
+        <h1>Gatekeeper Chat</h1>
+        <span class="time-badge" id="currentTime"></span>
+        <p>Daytime mode - internet is open. Just here to chat!</p>
+    </div>
+    <div class="chat-container" id="chatContainer">
+        <div class="message assistant" id="initialMessage">
+            Good morning! It's daytime so the internet is open - no gatekeeper needed right now. But I'm still here if you want to chat! How can I help you today?
+        </div>
+    </div>
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <span>Thinking...</span>
+    </div>
+    <div class="input-area" id="inputArea">
+        <textarea id="userInput" placeholder="Ask me anything..."></textarea>
+        <button type="button" id="sendBtn">Send</button>
+    </div>
+</div>
+<script>
+var sessionId = null;
+
+function updateTime() {
+    var now = new Date();
+    var h = now.getHours(), m = now.getMinutes();
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    var h12 = h % 12 || 12;
+    var timeStr = h12 + ':' + (m<10?'0':'') + m + ' ' + ampm;
+    document.getElementById('currentTime').textContent = timeStr;
+}
+updateTime();
+setInterval(updateTime, 60000);
+
+function addMessage(content, type) {
+    var container = document.getElementById('chatContainer');
+    var msg = document.createElement('div');
+    msg.className = 'message ' + type;
+    msg.textContent = content;
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+}
+
+function setLoading(active) {
+    document.getElementById('loading').className = active ? 'loading active' : 'loading';
+    document.getElementById('inputArea').className = active ? 'input-area hidden' : 'input-area';
+}
+
+function sendMessage() {
+    var input = document.getElementById('userInput');
+    var message = input.value.trim();
+    if (!message) return;
+
+    addMessage(message, 'user');
+    input.value = '';
+    setLoading(true);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/daychat', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onreadystatechange = function() {
+        if (xhr.readyState === 4) {
+            setLoading(false);
+            try {
+                var data = JSON.parse(xhr.responseText);
+                if (data.session_id) sessionId = data.session_id;
+                if (data.message) {
+                    addMessage(data.message, 'assistant');
+                }
+                if (data.status === 'error') {
+                    addMessage('Error: ' + data.message, 'system');
+                }
+            } catch(e) {
+                addMessage('Connection error. Please try again.', 'system');
+            }
+        }
+    };
+    xhr.onerror = function() {
+        setLoading(false);
+        addMessage('Network error. Please try again.', 'system');
+    };
+    xhr.send(JSON.stringify({session_id: sessionId, message: message}));
+}
+
+document.getElementById('sendBtn').onclick = sendMessage;
+document.getElementById('userInput').onkeydown = function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+};
+</script>
+</body>
+</html>"""
+
+DAYTIME_SYSTEM_PROMPT = """You are a friendly AI assistant on a home router. It's daytime, so the internet is open - you're NOT evaluating access requests.
+
+You're just here to chat! Be helpful, friendly, and conversational. You can:
+- Answer questions about anything
+- Have casual conversations
+- Help with general queries
+- Be a friendly companion
+
+Keep responses concise (1-3 sentences usually). Be warm and personable.
+
+IMPORTANT: You cannot grant or deny internet access during daytime - the gatekeeper is off. If someone asks for internet access, just let them know it's already open during daytime hours (5am-9pm).
+
+Respond with plain text only - no JSON formatting needed."""
+
+
+def is_nighttime():
+    """Check if current time is nighttime (9pm-5am)."""
+    hour = datetime.now().hour
+    return hour >= 21 or hour < 5
 
 
 def log(message):
@@ -1136,12 +1430,80 @@ def is_network_authenticated():
     return network_access_expiry is not None
 
 
+def render_time_chart(time_distribution):
+    """Render SVG scatter plot of time vs duration."""
+    if not time_distribution:
+        return '<div class="empty-state">No data yet</div>'
+
+    # Chart dimensions (viewBox coordinates)
+    width = 500
+    height = 170
+    padding_left = 45
+    padding_bottom = 25
+    padding_top = 10
+    padding_right = 10
+
+    chart_width = width - padding_left - padding_right
+    chart_height = height - padding_top - padding_bottom
+
+    # Time axis: 21:00 (9pm) to 05:00 (5am) - nighttime hours
+    # Map 21-24 to 0-3, and 0-5 to 3-8 (total 8 hours span)
+    def hour_to_x(hour):
+        if hour >= 21:
+            normalized = hour - 21  # 21->0, 22->1, 23->2, 24->3
+        else:
+            normalized = hour + 3   # 0->3, 1->4, 2->5, 3->6, 4->7, 5->8
+        return padding_left + (normalized / 8) * chart_width
+
+    # Duration axis: 0-120 minutes
+    max_duration = 120
+    def duration_to_y(duration):
+        return height - padding_bottom - (min(duration, max_duration) / max_duration) * chart_height
+
+    # Build SVG
+    svg_parts = [f'<svg class="chart-svg" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet">']
+
+    # Grid lines (horizontal for duration)
+    for dur in [30, 60, 90, 120]:
+        y = duration_to_y(dur)
+        svg_parts.append(f'<line class="grid-line" x1="{padding_left}" y1="{y}" x2="{width - padding_right}" y2="{y}"/>')
+        svg_parts.append(f'<text class="axis-label" x="{padding_left - 5}" y="{y + 4}" text-anchor="end">{dur}</text>')
+
+    # X-axis labels (time)
+    time_labels = [(21, "9pm"), (23, "11pm"), (1, "1am"), (3, "3am"), (5, "5am")]
+    for hour, label in time_labels:
+        x = hour_to_x(hour)
+        svg_parts.append(f'<text class="axis-label" x="{x}" y="{height - 5}" text-anchor="middle">{label}</text>')
+
+    # Axis titles
+    svg_parts.append(f'<text class="axis-title" x="{width / 2}" y="{height}" text-anchor="middle">Time of Night</text>')
+    svg_parts.append(f'<text class="axis-title" x="12" y="{height / 2}" text-anchor="middle" transform="rotate(-90, 12, {height / 2})">Duration (min)</text>')
+
+    # Data points
+    for point in time_distribution:
+        hour = point['hour']
+        duration = point['duration']
+        # Only show points in nighttime range (9pm-5am)
+        if hour >= 21 or hour < 5:
+            x = hour_to_x(hour)
+            y = duration_to_y(duration)
+            # Size based on duration (min 4, max 12)
+            r = 4 + (duration / 120) * 8
+            svg_parts.append(f'<circle class="data-point" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}"><title>{int(hour)}:{int((hour % 1) * 60):02d} - {duration} min</title></circle>')
+
+    svg_parts.append('</svg>')
+    return '\n'.join(svg_parts)
+
+
 def render_stats_page():
     """Render the stats HTML page with current data."""
     stats = get_stats()
 
     # Format total hours
     total_hours = f"{stats['total_minutes'] / 60:.1f}"
+
+    # Build time chart
+    time_chart = render_time_chart(stats.get('time_distribution', []))
 
     # Build history table
     if stats['recent']:
@@ -1169,6 +1531,7 @@ def render_stats_page():
     return STATS_HTML.format(
         total_exceptions=stats['total_exceptions'],
         total_hours=total_hours,
+        time_chart=time_chart,
         history_table=history_table
     )
 
@@ -1222,8 +1585,11 @@ Success
             self.send_html(render_stats_page())
             return
 
-        # All other GET requests get the splash page
-        self.send_html(SPLASH_HTML)
+        # Main page: serve nighttime splash or daytime chat based on time
+        if is_nighttime():
+            self.send_html(SPLASH_HTML)
+        else:
+            self.send_html(DAYTIME_HTML)
 
     def send_success_page(self):
         """Send a success page that closes the captive portal on macOS/iOS."""
@@ -1265,7 +1631,7 @@ p { color: #a0a0a0; }
         client_ip = self.client_address[0]
         parsed = urllib.parse.urlparse(self.path)
 
-        if parsed.path != "/chat":
+        if parsed.path not in ["/chat", "/daychat"]:
             self.send_json({"status": "error", "message": "Not found"}, 404)
             return
 
@@ -1304,7 +1670,10 @@ p { color: #a0a0a0; }
             self.send_json({"status": "error", "message": "Invalid request"}, 400)
             return
 
-        self.handle_chat(data, client_ip)
+        if parsed.path == "/daychat":
+            self.handle_daychat(data, client_ip)
+        else:
+            self.handle_chat(data, client_ip)
 
     def handle_chat(self, data, client_ip):
         """Handle chat message and LLM interaction."""
@@ -1379,6 +1748,103 @@ p { color: #a0a0a0; }
 
         response["session_id"] = session_id
         self.send_json(response)
+
+    def handle_daychat(self, data, client_ip):
+        """Handle daytime chat - just conversation, no access control."""
+        session_id = data.get("session_id")
+        message = data.get("message", "").strip()
+        mac = get_client_mac(client_ip)
+
+        # Find or create session
+        session = None
+        if session_id and session_id in sessions:
+            session = sessions[session_id]
+        else:
+            for sid, sess in sessions.items():
+                if sess["ip"] == client_ip:
+                    session_id = sid
+                    session = sess
+                    break
+
+        if not session:
+            session_id = generate_session_id(mac or "unknown", client_ip)
+            session = {
+                "mac": mac,
+                "ip": client_ip,
+                "history": [],
+                "questions_asked": 0,
+                "daytime": True
+            }
+            sessions[session_id] = session
+            log(f"New daytime session: {session_id[:8]}... for MAC={mac}, IP={client_ip}")
+
+        if not message:
+            self.send_json({"status": "error", "message": "Please enter a message.", "session_id": session_id}, 400)
+            return
+
+        # Add user message to history
+        session["history"].append({"role": "user", "content": message})
+
+        # Call Gemini with daytime system prompt
+        response = self.call_daychat_gemini(session["history"])
+
+        session["history"].append({"role": "assistant", "content": response})
+
+        self.send_json({"status": "ok", "message": response, "session_id": session_id})
+
+    def call_daychat_gemini(self, conversation_history):
+        """Call Gemini for daytime chat (no JSON, just plain text response)."""
+        gemini_ip = get_gemini_ip()
+        if not gemini_ip:
+            return "Sorry, I'm having trouble connecting right now. Try again in a moment!"
+
+        original_getaddrinfo = socket.getaddrinfo
+
+        def patched_getaddrinfo(host, port, *args, **kwargs):
+            if host == GEMINI_HOST:
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (gemini_ip, port))]
+            return original_getaddrinfo(host, port, *args, **kwargs)
+
+        socket.getaddrinfo = patched_getaddrinfo
+        try:
+            return self._call_daychat_internal(conversation_history)
+        finally:
+            socket.getaddrinfo = original_getaddrinfo
+
+    def _call_daychat_internal(self, conversation_history):
+        """Internal daytime chat API call."""
+        url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
+
+        contents = [{"role": "user", "parts": [{"text": DAYTIME_SYSTEM_PROMPT}]}]
+        contents.append({"role": "model", "parts": [{"text": "Got it! I'm here for friendly daytime chat. The internet is open, so I'm just a helpful companion. What would you like to talk about?"}]})
+
+        for msg in conversation_history:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.8,
+                "maxOutputTokens": 300
+            }
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                text = result["candidates"][0]["content"]["parts"][0]["text"]
+                return text.strip()
+        except Exception as e:
+            log(f"Daytime chat error: {e}")
+            return "Oops, something went wrong! Let me try that again - what were you saying?"
 
 
 def kick_wifi_clients():
