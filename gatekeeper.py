@@ -28,7 +28,8 @@ SERVER_PORT = 2050  # Use port 2050 for captive portal
 API_PORT = 2051   # API port for chat
 GATEWAY_IP = "192.168.8.1"
 LAN_INTERFACE = "br-lan"
-REQUEST_LOG_FILE = "/tmp/gatekeeper_requests.json"  # Persistent log for the night
+REQUEST_LOG_FILE = "/tmp/gatekeeper_requests.json"  # Temporary log for the night
+PERMANENT_LOG_FILE = "/root/gatekeeper_history.json"  # Persistent log across reboots
 EXTERNAL_DNS = "8.8.8.8"  # Use Google DNS to bypass local DNS hijacking
 
 # Network-wide access (single exemption for entire network)
@@ -79,6 +80,11 @@ def add_request_to_log(mac, reason, status, duration=None):
     save_request_log(requests)
     log(f"Logged request: {status} for {mac}")
 
+    # Also save approved requests to permanent log
+    if status == "approved":
+        check_and_trim_log()
+        save_to_permanent_log(entry)
+
 
 def clear_request_log():
     """Clear the request log (called when switching to open mode in the morning)."""
@@ -88,6 +94,88 @@ def clear_request_log():
             log("Request log cleared for new day")
     except Exception as e:
         log(f"Error clearing request log: {e}")
+
+
+# --- Permanent Log Functions ---
+
+def load_permanent_log():
+    """Load the permanent history log from file."""
+    try:
+        if os.path.exists(PERMANENT_LOG_FILE):
+            with open(PERMANENT_LOG_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        log(f"Error loading permanent log: {e}")
+    return []
+
+
+def save_permanent_log(entries):
+    """Save the permanent history log to file."""
+    try:
+        with open(PERMANENT_LOG_FILE, "w") as f:
+            json.dump(entries, f, indent=2)
+    except Exception as e:
+        log(f"Error saving permanent log: {e}")
+
+
+def save_to_permanent_log(entry):
+    """Append a single entry to the permanent log."""
+    entries = load_permanent_log()
+    entries.append(entry)
+    save_permanent_log(entries)
+    log(f"Saved to permanent log: {entry['timestamp']} - {entry['reason'][:50]}...")
+
+
+def check_and_trim_log():
+    """Check /overlay free space and trim log if less than 50MB free."""
+    try:
+        # Get free space on /overlay (persistent storage on OpenWrt)
+        result = subprocess.run(["df", "-m", "/overlay"], capture_output=True, text=True, check=False)
+        lines = result.stdout.strip().split("\n")
+        if len(lines) >= 2:
+            # Parse: Filesystem 1M-blocks Used Available Use% Mounted on
+            parts = lines[1].split()
+            if len(parts) >= 4:
+                available_mb = int(parts[3])
+                if available_mb < 50:
+                    log(f"Low storage: {available_mb}MB free on /overlay, trimming log...")
+                    trim_permanent_log()
+    except Exception as e:
+        log(f"Error checking storage: {e}")
+
+
+def trim_permanent_log():
+    """Delete oldest 50% of entries from permanent log."""
+    entries = load_permanent_log()
+    if len(entries) <= 10:
+        return  # Keep at least 10 entries
+
+    # Keep only the most recent 50%
+    half = len(entries) // 2
+    entries = entries[half:]
+    save_permanent_log(entries)
+    log(f"Trimmed permanent log, kept {len(entries)} entries")
+
+
+def get_stats():
+    """Calculate statistics from permanent log."""
+    entries = load_permanent_log()
+
+    total_exceptions = len(entries)
+    total_minutes = sum(e.get("duration", 0) for e in entries)
+
+    # Recent entries (last 20)
+    recent = entries[-20:] if entries else []
+    recent.reverse()  # Most recent first
+
+    return {
+        "total_exceptions": total_exceptions,
+        "total_minutes": total_minutes,
+        "recent": recent
+    }
+
+
+# --- End Permanent Log Functions ---
 
 
 def get_request_history_for_context():
@@ -187,8 +275,21 @@ body {
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.1);
 }
-.header { text-align: center; margin-bottom: 25px; }
+.header { text-align: center; margin-bottom: 25px; position: relative; }
 .header h1 { font-size: 1.5rem; margin-bottom: 8px; color: #fff; }
+.stats-link {
+    position: absolute;
+    top: 0;
+    right: 0;
+    font-size: 0.8rem;
+    color: #a0a0a0;
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    transition: background 0.2s;
+}
+.stats-link:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
 .time-badge {
     display: inline-block;
     background: rgba(255, 107, 107, 0.2);
@@ -325,6 +426,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 <body>
 <div class="container">
     <div class="header">
+        <a href="/stats" class="stats-link">Stats</a>
         <h1>Nighttime Access Request</h1>
         <span class="time-badge" id="currentTime"></span>
         <p>It's late. Please explain why you need internet access right now.</p>
@@ -514,6 +616,151 @@ document.getElementById('userInput').onkeydown = function(e) {
     }
 };
 </script>
+</body>
+</html>"""
+
+STATS_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gatekeeper Stats</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    min-height: 100vh;
+    padding: 20px;
+    color: #e4e4e4;
+}}
+.container {{
+    max-width: 800px;
+    margin: 0 auto;
+}}
+.header {{
+    text-align: center;
+    margin-bottom: 30px;
+}}
+.header h1 {{ font-size: 1.8rem; color: #fff; margin-bottom: 10px; }}
+.header p {{ color: #a0a0a0; }}
+.back-link {{
+    display: inline-block;
+    margin-bottom: 20px;
+    color: #4a69bd;
+    text-decoration: none;
+    font-size: 0.9rem;
+}}
+.back-link:hover {{ text-decoration: underline; }}
+.stats-cards {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+}}
+.stat-card {{
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(10px);
+    border-radius: 15px;
+    padding: 25px;
+    text-align: center;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.stat-card .number {{
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: #4a69bd;
+    margin-bottom: 5px;
+}}
+.stat-card .label {{
+    font-size: 0.9rem;
+    color: #a0a0a0;
+}}
+.recent-section {{
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(10px);
+    border-radius: 15px;
+    padding: 25px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.recent-section h2 {{
+    font-size: 1.2rem;
+    margin-bottom: 20px;
+    color: #fff;
+}}
+.history-table {{
+    width: 100%;
+    border-collapse: collapse;
+}}
+.history-table th,
+.history-table td {{
+    padding: 12px 10px;
+    text-align: left;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.history-table th {{
+    color: #a0a0a0;
+    font-weight: 500;
+    font-size: 0.85rem;
+}}
+.history-table td {{
+    font-size: 0.9rem;
+}}
+.history-table tr:last-child td {{
+    border-bottom: none;
+}}
+.reason-cell {{
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}}
+.duration-badge {{
+    display: inline-block;
+    background: rgba(74, 105, 189, 0.2);
+    color: #4a69bd;
+    padding: 4px 10px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+}}
+.empty-state {{
+    text-align: center;
+    padding: 40px;
+    color: #a0a0a0;
+}}
+@media (max-width: 600px) {{
+    .history-table th:nth-child(2),
+    .history-table td:nth-child(2) {{
+        display: none;
+    }}
+    .reason-cell {{
+        max-width: 150px;
+    }}
+}}
+</style>
+</head>
+<body>
+<div class="container">
+    <a href="/" class="back-link">&larr; Back to Portal</a>
+    <div class="header">
+        <h1>Gatekeeper Stats</h1>
+        <p>Exception history across all sessions</p>
+    </div>
+    <div class="stats-cards">
+        <div class="stat-card">
+            <div class="number">{total_exceptions}</div>
+            <div class="label">Total Exceptions</div>
+        </div>
+        <div class="stat-card">
+            <div class="number">{total_hours}</div>
+            <div class="label">Total Hours Granted</div>
+        </div>
+    </div>
+    <div class="recent-section">
+        <h2>Recent Exceptions</h2>
+        {history_table}
+    </div>
+</div>
 </body>
 </html>"""
 
@@ -889,6 +1136,43 @@ def is_network_authenticated():
     return network_access_expiry is not None
 
 
+def render_stats_page():
+    """Render the stats HTML page with current data."""
+    stats = get_stats()
+
+    # Format total hours
+    total_hours = f"{stats['total_minutes'] / 60:.1f}"
+
+    # Build history table
+    if stats['recent']:
+        rows = []
+        for entry in stats['recent']:
+            timestamp = entry.get('timestamp', 'Unknown')
+            reason = entry.get('reason', 'Unknown')[:80]
+            duration = entry.get('duration', 0)
+            rows.append(f"""<tr>
+                <td>{timestamp}</td>
+                <td class="reason-cell" title="{entry.get('reason', '')}">{reason}</td>
+                <td><span class="duration-badge">{duration} min</span></td>
+            </tr>""")
+        history_table = f"""<table class="history-table">
+            <thead>
+                <tr><th>Time</th><th>Reason</th><th>Duration</th></tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>"""
+    else:
+        history_table = '<div class="empty-state">No exceptions recorded yet</div>'
+
+    return STATS_HTML.format(
+        total_exceptions=stats['total_exceptions'],
+        total_hours=total_hours,
+        history_table=history_table
+    )
+
+
 class GatekeeperHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the captive portal."""
     timeout = 30  # Socket timeout in seconds
@@ -915,7 +1199,7 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        """Handle GET requests - serve splash page or success page."""
+        """Handle GET requests - serve splash page, stats page, or success page."""
         parsed = urllib.parse.urlparse(self.path)
 
         # Success endpoint - returns Apple's exact success HTML to dismiss CNA
@@ -931,6 +1215,11 @@ Success
 </BODY>
 </HTML>"""
             self.send_html(success_html)
+            return
+
+        # Stats page
+        if parsed.path == "/stats":
+            self.send_html(render_stats_page())
             return
 
         # All other GET requests get the splash page
@@ -1119,6 +1408,10 @@ def setup_firewall():
     subprocess.run(["iptables", "-t", "filter", "-I", "FORWARD", "1", "-i", LAN_INTERFACE,
                    "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"], check=False)
 
+    # Allow WAN access to stats page on port 2050
+    subprocess.run(["iptables", "-A", "INPUT", "-i", "eth0", "-p", "tcp", "--dport", str(SERVER_PORT),
+                   "-j", "ACCEPT"], check=False)
+
     # Enable DNS hijacking for iOS/Android captive portal detection
     enable_dns_hijacking()
 
@@ -1146,6 +1439,10 @@ def teardown_firewall():
     subprocess.run(["iptables", "-t", "filter", "-D", "FORWARD", "-i", LAN_INTERFACE,
                    "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
                   capture_output=True, check=False)
+
+    # Remove WAN access rule for stats page
+    subprocess.run(["iptables", "-D", "INPUT", "-i", "eth0", "-p", "tcp", "--dport", str(SERVER_PORT),
+                   "-j", "ACCEPT"], capture_output=True, check=False)
 
     # Disable DNS hijacking
     disable_dns_hijacking()
