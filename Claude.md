@@ -1,4 +1,4 @@
-# Project: LLM Gatekeeper (GL-MT3000 Beryl AX)
+# Project: Open Sesame - LLM Gatekeeper (GL-MT3000 Beryl AX)
 
 ## System Environment
 - **Device:** GL.iNet GL-MT3000 (OpenWrt 21.02/4.x based)
@@ -9,23 +9,36 @@
 ## Critical Constraints
 - **Low Storage:** The router has limited flash. Always check `df -h` before installing packages. Use `/tmp` for temporary files.
 - **Opkg over Apt:** Use `opkg update` and `opkg install` instead of `apt`.
-- **Nodogsplash (NDS):** The gatekeeper software is `nodogsplash`. Use `ndsctl` commands for authentication management.
-- **Python:** Use `python3`. Avoid heavy libraries (Pandas/Scikit-learn). Use `requests` for API calls.
+- **Python:** Use `python3`. Avoid heavy libraries (Pandas/Scikit-learn). HTTP requests use urllib (built-in).
 
 ## Command Execution Pattern
 - You are running on a laptop but targeting the router.
 - **DO NOT** run local commands like `systemctl` or `apt-get`.
 - **ALWAYS** prefix router commands with SSH: `ssh root@192.168.0.2 "[command]"`
-- To edit files: Read them via `ssh root@192.168.0.2 "cat /path/to/file"` and write them back using `scp` or `tee`.
+- To deploy files: Use `cat file | ssh root@192.168.0.2 "cat > /path/to/file"` (router lacks sftp-server).
 
-## Development Tasks
-1. **Captive Portal:** Modify `/etc/nodogsplash/htdocs/splash.html` to include the LLM justification prompt.
-2. **Justification Script:** Create `/root/gatekeeper.py` to handle NDS logout/login logic.
-3. **Cron/Dæmon:** Ensure the script runs on boot or via a trigger.
+## Architecture
+The system consists of a single Python file (`gatekeeper.py`) that provides:
+- **Nighttime Mode (9pm-5am)**: Captive portal requiring AI justification for internet access
+- **Daytime Mode (5am-9pm)**: Open access with optional Focus Mode and Voluntary Lockdown
+- **Stats Dashboard**: Tracks all activity with tabbed charts (Night/Day views)
+- **Settings Page**: Configure Focus Mode blocked domains
+
+## Key Files (on router)
+- `/root/gatekeeper.py` - Main server (~3300 lines)
+- `/root/gatekeeper.secrets` - API key (GEMINI_API_KEY=...)
+- `/root/gatekeeper_settings.json` - Focus mode domains
+- `/root/gatekeeper_history.json` - Permanent stats log
+
+## Repository Structure
+- `gatekeeper.py` - Main application with embedded HTML templates
+- `init.d/gatekeeper` - OpenWrt init script
+- `config/gatekeeper.secrets.example` - API key format example
 
 ## Coding Style
 - Prefer POSIX-compliant shell scripts or Python 3.
 - Use `logger` command in shell or `syslog` in Python for router logging.
+- All HTML templates use double curly braces `{{` for CSS (Python format escaping).
 
 # Git
 
