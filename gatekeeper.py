@@ -29,7 +29,8 @@ API_PORT = 2051   # API port for chat
 GATEWAY_IP = "192.168.8.1"
 LAN_INTERFACE = "br-lan"
 REQUEST_LOG_FILE = "/tmp/gatekeeper_requests.json"  # Temporary log for the night
-PERMANENT_LOG_FILE = "/root/gatekeeper_history.json"  # Persistent log across reboots
+CONVERSATION_LOG_FILE = "/tmp/gatekeeper_conversations.json"  # Full conversation log, cleared at daytime
+PERMANENT_LOG_FILE = "/root/gatekeeper_history.json"  # Persistent log across reboots (short summaries)
 EXTERNAL_DNS = "8.8.8.8"  # Use Google DNS to bypass local DNS hijacking
 
 # Network-wide access (single exemption for entire network)
@@ -80,10 +81,9 @@ def add_request_to_log(mac, reason, status, duration=None):
     save_request_log(requests)
     log(f"Logged request: {status} for {mac}")
 
-    # Also save approved requests to permanent log
-    if status == "approved":
-        check_and_trim_log()
-        save_to_permanent_log(entry)
+    # Save all requests (approved and denied) to permanent log
+    check_and_trim_log()
+    save_to_permanent_log(entry)
 
 
 def clear_request_log():
@@ -96,7 +96,55 @@ def clear_request_log():
         log(f"Error clearing request log: {e}")
 
 
-# --- Permanent Log Functions ---
+# --- Conversation Log Functions (detailed, cleared daily) ---
+
+def load_conversation_log():
+    """Load the full conversation log from file."""
+    try:
+        if os.path.exists(CONVERSATION_LOG_FILE):
+            with open(CONVERSATION_LOG_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        log(f"Error loading conversation log: {e}")
+    return []
+
+
+def save_conversation_log(conversations):
+    """Save the full conversation log to file."""
+    try:
+        with open(CONVERSATION_LOG_FILE, "w") as f:
+            json.dump(conversations, f, indent=2)
+    except Exception as e:
+        log(f"Error saving conversation log: {e}")
+
+
+def add_conversation_to_log(mac, conversation_history, status, duration=None):
+    """Add a complete conversation to the nightly log."""
+    conversations = load_conversation_log()
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mac": mac,
+        "status": status,
+        "conversation": conversation_history  # Full conversation with all messages
+    }
+    if duration:
+        entry["duration"] = duration
+    conversations.append(entry)
+    save_conversation_log(conversations)
+    log(f"Saved conversation to nightly log: {status} for {mac}")
+
+
+def clear_conversation_log():
+    """Clear the conversation log (called when switching to open mode)."""
+    try:
+        if os.path.exists(CONVERSATION_LOG_FILE):
+            os.remove(CONVERSATION_LOG_FILE)
+            log("Conversation log cleared for new day")
+    except Exception as e:
+        log(f"Error clearing conversation log: {e}")
+
+
+# --- Permanent Log Functions (summaries only) ---
 
 def load_permanent_log():
     """Load the permanent history log from file."""
@@ -161,29 +209,59 @@ def get_stats():
     """Calculate statistics from permanent log."""
     entries = load_permanent_log()
 
-    total_exceptions = len(entries)
-    total_minutes = sum(e.get("duration", 0) for e in entries)
+    # Separate approved and denied
+    approved_entries = [e for e in entries if e.get("status") == "approved"]
+    denied_entries = [e for e in entries if e.get("status") == "denied"]
+
+    total_approved = len(approved_entries)
+    total_denied = len(denied_entries)
+    total_minutes = sum(e.get("duration", 0) for e in approved_entries)
 
     # Recent entries (last 20)
     recent = entries[-20:] if entries else []
     recent.reverse()  # Most recent first
 
-    # Time distribution data for chart
-    time_distribution = []
+    # Time distribution data for chart (separate approved/denied)
+    time_distribution_approved = []
+    time_distribution_denied = []
     for entry in entries:
         try:
             ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
             hour = ts.hour + ts.minute / 60.0  # Decimal hour
             duration = entry.get("duration", 10)
-            time_distribution.append({"hour": hour, "duration": duration})
+            point = {"hour": hour, "duration": duration}
+            if entry.get("status") == "approved":
+                time_distribution_approved.append(point)
+            else:
+                time_distribution_denied.append(point)
+        except (ValueError, TypeError):
+            pass
+
+    # Weekday distribution
+    weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    weekday_approved = [0] * 7
+    weekday_denied = [0] * 7
+    for entry in entries:
+        try:
+            ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M:%S")
+            weekday = ts.weekday()  # 0=Monday, 6=Sunday
+            if entry.get("status") == "approved":
+                weekday_approved[weekday] += 1
+            else:
+                weekday_denied[weekday] += 1
         except (ValueError, TypeError):
             pass
 
     return {
-        "total_exceptions": total_exceptions,
+        "total_approved": total_approved,
+        "total_denied": total_denied,
         "total_minutes": total_minutes,
         "recent": recent,
-        "time_distribution": time_distribution
+        "time_distribution_approved": time_distribution_approved,
+        "time_distribution_denied": time_distribution_denied,
+        "weekday_approved": weekday_approved,
+        "weekday_denied": weekday_denied,
+        "weekday_names": weekday_names
     }
 
 
@@ -726,12 +804,29 @@ body {{
     stroke-width: 1;
 }}
 .data-point {{
-    fill: #4a69bd;
     opacity: 0.7;
+}}
+.data-point.approved {{
+    fill: #4a69bd;
+}}
+.data-point.denied {{
+    fill: #ff6b6b;
 }}
 .data-point:hover {{
     opacity: 1;
     filter: brightness(1.2);
+}}
+.bar {{
+    opacity: 0.8;
+}}
+.bar.approved {{
+    fill: #4a69bd;
+}}
+.bar.denied {{
+    fill: #ff6b6b;
+}}
+.bar:hover {{
+    opacity: 1;
 }}
 .recent-section {{
     background: rgba(255, 255, 255, 0.05);
@@ -780,6 +875,17 @@ body {{
     border-radius: 10px;
     font-size: 0.85rem;
 }}
+.duration-badge.approved {{
+    background: rgba(74, 105, 189, 0.2);
+    color: #4a69bd;
+}}
+.duration-badge.denied {{
+    background: rgba(255, 107, 107, 0.2);
+    color: #ff6b6b;
+}}
+.stat-card .number.denied {{
+    color: #ff6b6b;
+}}
 .empty-state {{
     text-align: center;
     padding: 40px;
@@ -808,12 +914,16 @@ body {{
     </div>
     <div class="stats-cards">
         <div class="stat-card">
-            <div class="number">{total_exceptions}</div>
-            <div class="label">Total Exceptions</div>
+            <div class="number">{total_approved}</div>
+            <div class="label">Approved</div>
+        </div>
+        <div class="stat-card">
+            <div class="number denied">{total_denied}</div>
+            <div class="label">Denied</div>
         </div>
         <div class="stat-card">
             <div class="number">{total_hours}</div>
-            <div class="label">Total Hours Granted</div>
+            <div class="label">Hours Granted</div>
         </div>
     </div>
     <div class="chart-section">
@@ -822,8 +932,14 @@ body {{
             {time_chart}
         </div>
     </div>
+    <div class="chart-section">
+        <h2>Requests by Weekday</h2>
+        <div class="chart-container" style="height: 200px;">
+            {weekday_chart}
+        </div>
+    </div>
     <div class="recent-section">
-        <h2>Recent Exceptions</h2>
+        <h2>Recent Requests</h2>
         {history_table}
     </div>
 </div>
@@ -1430,9 +1546,9 @@ def is_network_authenticated():
     return network_access_expiry is not None
 
 
-def render_time_chart(time_distribution):
-    """Render SVG scatter plot of time vs duration."""
-    if not time_distribution:
+def render_time_chart(approved_data, denied_data):
+    """Render SVG scatter plot of time vs duration with approved (blue) and denied (red)."""
+    if not approved_data and not denied_data:
         return '<div class="empty-state">No data yet</div>'
 
     # Chart dimensions (viewBox coordinates)
@@ -1479,8 +1595,8 @@ def render_time_chart(time_distribution):
     svg_parts.append(f'<text class="axis-title" x="{width / 2}" y="{height - 5}" text-anchor="middle">Time of Night</text>')
     svg_parts.append(f'<text class="axis-title" x="12" y="{(height - padding_bottom) / 2 + padding_top}" text-anchor="middle" transform="rotate(-90, 12, {(height - padding_bottom) / 2 + padding_top})">Duration (min)</text>')
 
-    # Data points
-    for point in time_distribution:
+    # Approved data points (blue)
+    for point in approved_data:
         hour = point['hour']
         duration = point['duration']
         # Only show points in nighttime range (9pm-5am)
@@ -1489,7 +1605,69 @@ def render_time_chart(time_distribution):
             y = duration_to_y(duration)
             # Size based on duration (min 4, max 12)
             r = 4 + (duration / 120) * 8
-            svg_parts.append(f'<circle class="data-point" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}"><title>{int(hour)}:{int((hour % 1) * 60):02d} - {duration} min</title></circle>')
+            svg_parts.append(f'<circle class="data-point approved" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}"><title>Approved {int(hour)}:{int((hour % 1) * 60):02d} - {duration} min</title></circle>')
+
+    # Denied data points (red) - fixed size since no duration
+    for point in denied_data:
+        hour = point['hour']
+        # Only show points in nighttime range (9pm-5am)
+        if hour >= 21 or hour < 5:
+            x = hour_to_x(hour)
+            y = duration_to_y(0)  # Denied requests at bottom (0 duration granted)
+            svg_parts.append(f'<circle class="data-point denied" cx="{x:.1f}" cy="{y:.1f}" r="5"><title>Denied {int(hour)}:{int((hour % 1) * 60):02d}</title></circle>')
+
+    # Legend
+    svg_parts.append(f'<circle class="data-point approved" cx="{width - 80}" cy="15" r="5"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 70}" y="19">Approved</text>')
+    svg_parts.append(f'<circle class="data-point denied" cx="{width - 80}" cy="30" r="5"/>')
+    svg_parts.append(f'<text class="axis-label" x="{width - 70}" y="34">Denied</text>')
+
+    svg_parts.append('</svg>')
+    return '\n'.join(svg_parts)
+
+
+def render_weekday_chart(weekday_approved, weekday_denied, weekday_names):
+    """Render SVG bar chart of exceptions per weekday."""
+    max_count = max(max(weekday_approved), max(weekday_denied), 1)
+
+    # Chart dimensions
+    width = 500
+    height = 150
+    padding_left = 35
+    padding_bottom = 25
+    padding_top = 10
+    padding_right = 10
+
+    chart_width = width - padding_left - padding_right
+    chart_height = height - padding_top - padding_bottom
+    bar_width = chart_width / 7 * 0.35  # Each day gets space, bars are 35% of that
+    gap = chart_width / 7
+
+    svg_parts = [f'<svg class="chart-svg" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet">']
+
+    # Grid lines
+    for i in range(1, 5):
+        y_val = max_count * i / 4
+        y = height - padding_bottom - (i / 4) * chart_height
+        svg_parts.append(f'<line class="grid-line" x1="{padding_left}" y1="{y}" x2="{width - padding_right}" y2="{y}"/>')
+        svg_parts.append(f'<text class="axis-label" x="{padding_left - 5}" y="{y + 4}" text-anchor="end">{int(y_val)}</text>')
+
+    # Bars for each day
+    for i, day in enumerate(weekday_names):
+        x_center = padding_left + gap * i + gap / 2
+
+        # Approved bar (blue)
+        approved_height = (weekday_approved[i] / max_count) * chart_height if max_count > 0 else 0
+        if approved_height > 0:
+            svg_parts.append(f'<rect class="bar approved" x="{x_center - bar_width - 1}" y="{height - padding_bottom - approved_height}" width="{bar_width}" height="{approved_height}"><title>{day}: {weekday_approved[i]} approved</title></rect>')
+
+        # Denied bar (red)
+        denied_height = (weekday_denied[i] / max_count) * chart_height if max_count > 0 else 0
+        if denied_height > 0:
+            svg_parts.append(f'<rect class="bar denied" x="{x_center + 1}" y="{height - padding_bottom - denied_height}" width="{bar_width}" height="{denied_height}"><title>{day}: {weekday_denied[i]} denied</title></rect>')
+
+        # Day label
+        svg_parts.append(f'<text class="axis-label" x="{x_center}" y="{height - 5}" text-anchor="middle">{day}</text>')
 
     svg_parts.append('</svg>')
     return '\n'.join(svg_parts)
@@ -1502,8 +1680,18 @@ def render_stats_page():
     # Format total hours
     total_hours = f"{stats['total_minutes'] / 60:.1f}"
 
-    # Build time chart
-    time_chart = render_time_chart(stats.get('time_distribution', []))
+    # Build time chart (approved and denied)
+    time_chart = render_time_chart(
+        stats.get('time_distribution_approved', []),
+        stats.get('time_distribution_denied', [])
+    )
+
+    # Build weekday chart
+    weekday_chart = render_weekday_chart(
+        stats.get('weekday_approved', [0]*7),
+        stats.get('weekday_denied', [0]*7),
+        stats.get('weekday_names', ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+    )
 
     # Build history table
     if stats['recent']:
@@ -1511,15 +1699,18 @@ def render_stats_page():
         for entry in stats['recent']:
             timestamp = entry.get('timestamp', 'Unknown')
             reason = entry.get('reason', 'Unknown')[:80]
+            status = entry.get('status', 'approved')
             duration = entry.get('duration', 0)
+            status_class = 'approved' if status == 'approved' else 'denied'
+            duration_text = f'{duration} min' if status == 'approved' else 'Denied'
             rows.append(f"""<tr>
                 <td>{timestamp}</td>
                 <td class="reason-cell" title="{entry.get('reason', '')}">{reason}</td>
-                <td><span class="duration-badge">{duration} min</span></td>
+                <td><span class="duration-badge {status_class}">{duration_text}</span></td>
             </tr>""")
         history_table = f"""<table class="history-table">
             <thead>
-                <tr><th>Time</th><th>Reason</th><th>Duration</th></tr>
+                <tr><th>Time</th><th>Reason</th><th>Result</th></tr>
             </thead>
             <tbody>
                 {''.join(rows)}
@@ -1529,9 +1720,11 @@ def render_stats_page():
         history_table = '<div class="empty-state">No exceptions recorded yet</div>'
 
     return STATS_HTML.format(
-        total_exceptions=stats['total_exceptions'],
+        total_approved=stats['total_approved'],
+        total_denied=stats['total_denied'],
         total_hours=total_hours,
         time_chart=time_chart,
+        weekday_chart=weekday_chart,
         history_table=history_table
     )
 
@@ -1733,18 +1926,24 @@ p { color: #a0a0a0; }
             if grant_network_access(duration, mac_addr):
                 response["granted"] = True
                 log(f"Network access approved (requested by {mac_addr}): {duration} minutes")
-                # Log to persistent request log
+                # Log to persistent request log (short summary)
                 first_message = session["history"][0]["content"] if session["history"] else "Unknown"
                 add_request_to_log(mac_addr, first_message, "approved", duration)
+                # Log full conversation to nightly log
+                conversation_texts = [h.get("content", "") for h in session["history"] if "content" in h]
+                add_conversation_to_log(mac_addr, conversation_texts, "approved", duration)
             else:
                 log(f"Failed to grant network access")
                 response = {"status": "error", "message": "Failed to grant access. Please try again."}
 
         elif response.get("status") == "denied":
             log(f"Access denied for {session['mac']}: {response.get('message', 'No reason')}")
-            # Log to persistent request log
+            # Log to persistent request log (short summary)
             first_message = session["history"][0]["content"] if session["history"] else "Unknown"
             add_request_to_log(session["mac"], first_message, "denied")
+            # Log full conversation to nightly log
+            conversation_texts = [h.get("content", "") for h in session["history"] if "content" in h]
+            add_conversation_to_log(session["mac"], conversation_texts, "denied")
 
         response["session_id"] = session_id
         self.send_json(response)
@@ -1929,8 +2128,9 @@ def disable_gatekeeper():
     """Disable captive portal - open access."""
     log("Disabling gatekeeper mode (open access)...")
     teardown_firewall()
-    # Clear the request log for the new day
+    # Clear the nightly logs for the new day
     clear_request_log()
+    clear_conversation_log()
     log("Gatekeeper mode disabled - internet access is open")
 
 
