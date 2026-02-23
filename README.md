@@ -32,8 +32,19 @@ For requests over 10 minutes, **proof is required** (screenshot of email, calend
 
 ### Schedule
 
-- **5:00 AM - 9:00 PM**: Open access (no restrictions)
-- **9:00 PM - 5:00 AM**: Captive portal with LLM justification
+- **5:00 AM - 9:00 PM**: Daytime mode (open access with Focus Mode & Lockdown options)
+- **9:00 PM - 5:00 AM**: Nighttime mode (captive portal with LLM justification)
+
+### Daytime Features
+
+During the day, you can optionally restrict yourself:
+
+| Feature | Description |
+|---------|-------------|
+| **Focus Mode** | Blocks distracting sites (YouTube, Instagram, Twitter, etc.) via DNS & IP firewall |
+| **Lock Internet** | Voluntarily blocks all internet; requires AI justification to unlock |
+
+Both features have configurable durations (15 min to end-of-day).
 
 ## Technical Architecture
 
@@ -69,10 +80,23 @@ For requests over 10 minutes, **proof is required** (screenshot of email, calend
 smart_router/
 ├── README.md                 # This file
 ├── ROUTER_SETUP.md           # Reproducible setup instructions
-├── gatekeeper.py             # Main Python server (~1100 lines)
+├── gatekeeper.py             # Main Python server (~2600 lines)
 ├── logo.png                  # Project logo
 └── init.d/
     └── gatekeeper            # OpenWrt startup script
+```
+
+### Data Files (on router)
+
+```
+/root/
+├── gatekeeper.py             # Main server
+├── gatekeeper.secrets        # API key (GEMINI_API_KEY=...)
+├── gatekeeper_settings.json  # Focus mode domains config
+└── gatekeeper_history.json   # Permanent stats log
+/tmp/
+├── gatekeeper_requests.json  # Nightly request summaries (cleared daily)
+└── gatekeeper_conversations.json  # Full conversation logs (cleared daily)
 ```
 
 ## Quick Start
@@ -119,6 +143,15 @@ ssh root@192.168.0.2 "python3 /root/gatekeeper.py --mode open"
 ssh root@192.168.0.2 "python3 /root/gatekeeper.py --server"
 ```
 
+### Web Interface
+
+| URL | Description |
+|-----|-------------|
+| `http://192.168.8.1:2050/` | Main portal (LAN) |
+| `http://192.168.0.2:2050/` | Main portal (WAN) |
+| `http://192.168.8.1:2050/stats` | Statistics dashboard |
+| `http://192.168.8.1:2050/settings` | Focus mode domain settings |
+
 ## Requirements
 
 ### Hardware
@@ -159,6 +192,33 @@ The gatekeeper AI acts like a **warm, loving parent** - genuinely caring about y
 - Repeated requests for the same reason
 
 Example denial: *"I know it feels important right now, but this can wait until morning. Your sleep tonight will help you tackle it better tomorrow. Sweet dreams!"*
+
+## Stats Dashboard
+
+The `/stats` page shows:
+- **Total approved/denied** requests
+- **Hours granted** (cumulative)
+- **Time distribution chart** - scatter plot of when exceptions occur (9pm-5am) vs duration
+- **Weekday distribution** - bar chart showing patterns by day of week
+- **Recent requests** - last 20 with timestamps and results
+
+All stats persist across reboots in `/root/gatekeeper_history.json`.
+
+## Focus Mode
+
+Focus mode blocks distracting websites during daytime when you need to concentrate:
+
+1. Go to the daytime portal and click "Focus Mode"
+2. Select duration (15 min to end of day)
+3. Sites are blocked via:
+   - **DNS blocking**: dnsmasq resolves domains to 0.0.0.0
+   - **IP firewall**: iptables blocks resolved IPs (fetched fresh each activation)
+
+Default blocked sites: YouTube, Instagram, Twitter/X, Telegram, ZDF
+
+### Customizing Blocked Sites
+
+Visit `/settings` to add or remove domains. Both the domain and its `www.` variant are handled automatically.
 
 ## Blog Post
 

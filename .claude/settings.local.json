@@ -37,7 +37,10 @@
       "Bash(ls -la /Users/kryptokommunist/Documents/Code/smart_router/*.png)",
       "Bash(git mv Gemini_Generated_Image_auqjllauqjllauqj.png logo.png)",
       "Bash(git remote set-url origin https://github.com/kryptokommunist/open-sesame.git)",
-      "Bash(jekyll build)"
+      "Bash(jekyll build)",
+      "Bash(git add gatekeeper.py)",
+      "Bash(git add README.md)",
+      "Bash(git add ROUTER_SETUP.md)"
     ]
   }
 }

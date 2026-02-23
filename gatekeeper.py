@@ -31,11 +31,32 @@ LAN_INTERFACE = "br-lan"
 REQUEST_LOG_FILE = "/tmp/gatekeeper_requests.json"  # Temporary log for the night
 CONVERSATION_LOG_FILE = "/tmp/gatekeeper_conversations.json"  # Full conversation log, cleared at daytime
 PERMANENT_LOG_FILE = "/root/gatekeeper_history.json"  # Persistent log across reboots (short summaries)
+SETTINGS_FILE = "/root/gatekeeper_settings.json"  # User settings (focus mode domains, etc.)
 EXTERNAL_DNS = "8.8.8.8"  # Use Google DNS to bypass local DNS hijacking
+
+# Default focus mode domains
+DEFAULT_FOCUS_DOMAINS = [
+    "youtube.com", "www.youtube.com", "m.youtube.com",
+    "instagram.com", "www.instagram.com",
+    "twitter.com", "www.twitter.com", "x.com", "www.x.com",
+    "zdf.de", "www.zdf.de",
+    "telegram.org", "www.telegram.org", "web.telegram.org"
+]
 
 # Network-wide access (single exemption for entire network)
 network_access_expiry = None  # timestamp when access expires, None = blocked
 network_access_granted_by = None  # MAC that requested access
+
+# Focus mode state
+focus_mode_active = False
+focus_mode_expiry = None
+focus_mode_blocked_ips = set()
+
+# Voluntary lockdown state (daytime self-imposed restrictions)
+voluntary_lockdown_active = False
+voluntary_lockdown_expiry = None
+voluntary_lockdown_reason = None
+voluntary_lockdown_exceptions = []
 
 # Session storage (in-memory, cleared on restart)
 sessions = {}  # {session_id: {"mac": str, "ip": str, "history": [], "questions_asked": int}}
@@ -203,6 +224,205 @@ def trim_permanent_log():
     entries = entries[half:]
     save_permanent_log(entries)
     log(f"Trimmed permanent log, kept {len(entries)} entries")
+
+
+# --- Settings Functions ---
+
+def load_settings():
+    """Load user settings from file."""
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        log(f"Error loading settings: {e}")
+    return {"focus_domains": DEFAULT_FOCUS_DOMAINS}
+
+
+def save_settings(settings):
+    """Save user settings to file."""
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        log(f"Error saving settings: {e}")
+
+
+def get_focus_domains():
+    """Get the list of domains to block in focus mode."""
+    settings = load_settings()
+    return settings.get("focus_domains", DEFAULT_FOCUS_DOMAINS)
+
+
+def set_focus_domains(domains):
+    """Set the list of domains to block in focus mode."""
+    settings = load_settings()
+    settings["focus_domains"] = domains
+    save_settings(settings)
+
+
+# --- Focus Mode Functions ---
+
+def resolve_domain_ips(domain):
+    """Resolve a domain to its IP addresses using external DNS."""
+    ips = set()
+    try:
+        result = subprocess.run(
+            ["nslookup", domain, EXTERNAL_DNS],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.split("\n"):
+            if "Address" in line and EXTERNAL_DNS not in line and "#" not in line:
+                parts = line.split()
+                for part in parts:
+                    if part.count(".") == 3 and all(p.isdigit() for p in part.split(".")):
+                        ips.add(part)
+    except Exception as e:
+        log(f"Error resolving {domain}: {e}")
+    return ips
+
+
+def enable_focus_mode(duration_minutes):
+    """Enable focus mode - block distracting sites via DNS and IP."""
+    global focus_mode_active, focus_mode_expiry, focus_mode_blocked_ips
+
+    domains = get_focus_domains()
+    log(f"Enabling focus mode for {duration_minutes} minutes, blocking {len(domains)} domains...")
+
+    focus_mode_active = True
+    focus_mode_expiry = time.time() + (duration_minutes * 60)
+    focus_mode_blocked_ips = set()
+
+    # Block each domain via DNS (dnsmasq) and collect IPs for firewall
+    for domain in domains:
+        # Add DNS block (resolve to 0.0.0.0)
+        subprocess.run(["uci", "add_list", f"dhcp.@dnsmasq[0].address=/{domain}/0.0.0.0"], check=False)
+
+        # Resolve and block IPs
+        ips = resolve_domain_ips(domain)
+        focus_mode_blocked_ips.update(ips)
+
+    # Commit DNS changes
+    subprocess.run(["uci", "commit", "dhcp"], check=False)
+    subprocess.run(["/etc/init.d/dnsmasq", "restart"], check=False)
+
+    # Block IPs in firewall
+    for ip in focus_mode_blocked_ips:
+        subprocess.run(["iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "REJECT"], check=False)
+
+    log(f"Focus mode enabled, blocked {len(focus_mode_blocked_ips)} IPs")
+    return True
+
+
+def disable_focus_mode():
+    """Disable focus mode - unblock sites."""
+    global focus_mode_active, focus_mode_expiry, focus_mode_blocked_ips
+
+    if not focus_mode_active:
+        return
+
+    log("Disabling focus mode...")
+
+    domains = get_focus_domains()
+
+    # Remove DNS blocks
+    for domain in domains:
+        subprocess.run(["uci", "del_list", f"dhcp.@dnsmasq[0].address=/{domain}/0.0.0.0"],
+                      capture_output=True, check=False)
+
+    # Commit DNS changes
+    subprocess.run(["uci", "commit", "dhcp"], check=False)
+    subprocess.run(["/etc/init.d/dnsmasq", "restart"], check=False)
+
+    # Remove IP blocks from firewall
+    for ip in focus_mode_blocked_ips:
+        subprocess.run(["iptables", "-D", "FORWARD", "-d", ip, "-j", "REJECT"],
+                      capture_output=True, check=False)
+
+    focus_mode_active = False
+    focus_mode_expiry = None
+    focus_mode_blocked_ips = set()
+
+    log("Focus mode disabled")
+
+
+def check_focus_mode_expiry():
+    """Check if focus mode has expired."""
+    global focus_mode_expiry
+    if focus_mode_active and focus_mode_expiry and time.time() > focus_mode_expiry:
+        log("Focus mode has expired!")
+        disable_focus_mode()
+
+
+# --- Voluntary Lockdown Functions ---
+
+def enable_voluntary_lockdown(duration_minutes, reason, exceptions):
+    """Enable voluntary lockdown - user-initiated internet block during daytime."""
+    global voluntary_lockdown_active, voluntary_lockdown_expiry
+    global voluntary_lockdown_reason, voluntary_lockdown_exceptions
+
+    log(f"Enabling voluntary lockdown for {duration_minutes} minutes. Reason: {reason}")
+
+    voluntary_lockdown_active = True
+    voluntary_lockdown_expiry = time.time() + (duration_minutes * 60)
+    voluntary_lockdown_reason = reason
+    voluntary_lockdown_exceptions = exceptions
+
+    # Set up firewall rules (same as gatekeeper mode but during daytime)
+    setup_firewall()
+
+    log(f"Voluntary lockdown enabled until {datetime.fromtimestamp(voluntary_lockdown_expiry).strftime('%H:%M')}")
+    return True
+
+
+def disable_voluntary_lockdown():
+    """Disable voluntary lockdown."""
+    global voluntary_lockdown_active, voluntary_lockdown_expiry
+    global voluntary_lockdown_reason, voluntary_lockdown_exceptions
+
+    if not voluntary_lockdown_active:
+        return
+
+    log("Disabling voluntary lockdown...")
+
+    teardown_firewall()
+
+    voluntary_lockdown_active = False
+    voluntary_lockdown_expiry = None
+    voluntary_lockdown_reason = None
+    voluntary_lockdown_exceptions = []
+
+    log("Voluntary lockdown disabled")
+
+
+def check_voluntary_lockdown_expiry():
+    """Check if voluntary lockdown has expired."""
+    if voluntary_lockdown_active and voluntary_lockdown_expiry and time.time() > voluntary_lockdown_expiry:
+        log("Voluntary lockdown has expired!")
+        disable_voluntary_lockdown()
+
+
+def get_minutes_until_daytime_end():
+    """Get minutes until 9pm (end of daytime)."""
+    now = datetime.now()
+    end_of_daytime = now.replace(hour=21, minute=0, second=0, microsecond=0)
+    if now >= end_of_daytime:
+        return 0
+    return int((end_of_daytime - now).total_seconds() / 60)
+
+
+def get_status():
+    """Get current system status."""
+    return {
+        "is_nighttime": is_nighttime(),
+        "focus_mode_active": focus_mode_active,
+        "focus_mode_expiry": focus_mode_expiry,
+        "voluntary_lockdown_active": voluntary_lockdown_active,
+        "voluntary_lockdown_expiry": voluntary_lockdown_expiry,
+        "voluntary_lockdown_reason": voluntary_lockdown_reason,
+        "network_access_expiry": network_access_expiry,
+        "minutes_until_daytime_end": get_minutes_until_daytime_end()
+    }
 
 
 def get_stats():
@@ -674,10 +894,9 @@ function sendMessage() {
                     addMessage(data.message, 'assistant');
                     addMessage('Internet access expires at ' + expiryStr, 'system');
                     disableInput();
-                    // Redirect to our success page which returns Apple's exact success HTML
-                    // This triggers the "Done" button in macOS/iOS Captive Network Assistant
+                    // Redirect to stats page on the WAN side
                     setTimeout(function() {
-                        window.location.href = '/success';
+                        window.location.href = 'http://192.168.0.2:2050/stats';
                     }, 2000);
                 } else if (data.status === 'denied') {
                     addMessage('Access Denied', 'denied');
@@ -951,59 +1170,89 @@ DAYTIME_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gatekeeper Chat</title>
+<title>Gatekeeper - Daytime</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    background: linear-gradient(135deg, #fef9e7 0%, #fdeaa8 50%, #f6d365 100%);
     min-height: 100vh;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 20px;
-    color: #e4e4e4;
+    color: #2d3436;
 }
 .container {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.85);
     backdrop-filter: blur(10px);
     border-radius: 20px;
     padding: 30px;
     max-width: 500px;
     width: 100%;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.5);
 }
 .header { text-align: center; margin-bottom: 25px; position: relative; }
-.header h1 { font-size: 1.5rem; margin-bottom: 8px; color: #fff; }
-.stats-link {
+.header h1 { font-size: 1.5rem; margin-bottom: 8px; color: #d35400; }
+.nav-links {
     position: absolute;
     top: 0;
     right: 0;
+    display: flex;
+    gap: 8px;
+}
+.nav-link {
     font-size: 0.8rem;
-    color: #a0a0a0;
+    color: #7f8c8d;
     text-decoration: none;
     padding: 5px 10px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(0, 0, 0, 0.05);
     transition: background 0.2s;
 }
-.stats-link:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.nav-link:hover { background: rgba(0, 0, 0, 0.1); color: #2d3436; }
 .time-badge {
     display: inline-block;
-    background: rgba(46, 213, 115, 0.2);
-    color: #2ed573;
+    background: rgba(243, 156, 18, 0.2);
+    color: #d35400;
     padding: 5px 15px;
     border-radius: 20px;
     font-size: 0.85rem;
 }
-.header p { margin-top: 15px; font-size: 0.95rem; color: #a0a0a0; line-height: 1.5; }
+.header p { margin-top: 15px; font-size: 0.95rem; color: #7f8c8d; line-height: 1.5; }
+.mode-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.mode-btn {
+    padding: 20px 15px;
+    border: none;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.03);
+    color: #2d3436;
+    font-size: 0.9rem;
+    cursor: pointer;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    transition: all 0.2s;
+    text-align: center;
+}
+.mode-btn:hover { background: rgba(0, 0, 0, 0.06); }
+.mode-btn.active { border-color: #d35400; background: rgba(211, 84, 0, 0.1); }
+.mode-btn .icon { font-size: 1.5rem; display: block; margin-bottom: 8px; }
+.mode-btn .label { font-weight: 500; }
+.mode-btn.lockdown { border-color: rgba(192, 57, 43, 0.3); }
+.mode-btn.lockdown:hover { background: rgba(192, 57, 43, 0.1); }
+.mode-btn.focus { border-color: rgba(243, 156, 18, 0.5); }
+.mode-btn.focus:hover { background: rgba(243, 156, 18, 0.15); }
 .chat-container {
-    background: rgba(0, 0, 0, 0.2);
+    background: rgba(0, 0, 0, 0.03);
     border-radius: 15px;
     padding: 15px;
     margin-bottom: 20px;
-    max-height: 350px;
+    max-height: 250px;
     overflow-y: auto;
 }
 .message {
@@ -1013,61 +1262,121 @@ body {
     max-width: 85%;
     line-height: 1.4;
 }
-.message.user { background: #4a69bd; margin-left: auto; border-bottom-right-radius: 4px; }
-.message.assistant { background: rgba(255, 255, 255, 0.1); margin-right: auto; border-bottom-left-radius: 4px; }
-.message.system { background: rgba(255, 193, 7, 0.15); color: #ffc107; text-align: center; max-width: 100%; font-size: 0.9rem; }
+.message.user { background: #d35400; color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
+.message.assistant { background: rgba(0, 0, 0, 0.05); color: #2d3436; margin-right: auto; border-bottom-left-radius: 4px; }
+.message.system { background: rgba(243, 156, 18, 0.2); color: #b7791f; text-align: center; max-width: 100%; font-size: 0.9rem; }
+.message.success { background: rgba(39, 174, 96, 0.2); color: #1e8449; text-align: center; max-width: 100%; }
 .input-area { display: flex; gap: 10px; }
 textarea {
     flex: 1;
     padding: 15px;
     border: none;
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
+    background: rgba(0, 0, 0, 0.05);
+    color: #2d3436;
     font-size: 1rem;
     resize: none;
     height: 60px;
     font-family: inherit;
 }
-textarea:focus { outline: 2px solid #4a69bd; }
-textarea::placeholder { color: #666; }
+textarea:focus { outline: 2px solid #d35400; }
+textarea::placeholder { color: #95a5a6; }
 button {
     padding: 15px 25px;
     border: none;
     border-radius: 12px;
-    background: #4a69bd;
+    background: #d35400;
     color: #fff;
     font-size: 1rem;
     cursor: pointer;
     font-weight: 500;
 }
-button:hover:not(:disabled) { background: #3c5aa6; }
+button:hover:not(:disabled) { background: #e67e22; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-.loading { display: none; text-align: center; padding: 15px; }
+.loading { display: none; text-align: center; padding: 15px; color: #7f8c8d; }
 .loading.active { display: block; }
 .spinner {
     width: 30px; height: 30px;
-    border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: #4a69bd;
+    border: 3px solid rgba(0, 0, 0, 0.1);
+    border-top-color: #d35400;
     border-radius: 50%;
     animation: spin 1s linear infinite;
     margin: 0 auto 10px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .hidden { display: none; }
+.form-group { margin-bottom: 15px; }
+.form-group label { display: block; margin-bottom: 8px; color: #7f8c8d; font-size: 0.9rem; }
+.form-group input, .form-group select {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.05);
+    color: #2d3436;
+    font-size: 1rem;
+}
+.form-group input:focus, .form-group select:focus { outline: 2px solid #d35400; }
+.modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 100; }
+.modal.active { display: flex; }
+.modal-content {
+    background: linear-gradient(135deg, #fff 0%, #fef9e7 100%);
+    border-radius: 20px;
+    padding: 30px;
+    max-width: 450px;
+    width: 90%;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: #2d3436;
+}
+.modal-header { margin-bottom: 20px; }
+.modal-header h2 { font-size: 1.3rem; color: #2d3436; }
+.btn-row { display: flex; gap: 10px; margin-top: 20px; }
+.btn-row button { flex: 1; }
+.btn-cancel { background: rgba(0, 0, 0, 0.08); color: #2d3436; }
+.btn-cancel:hover { background: rgba(0, 0, 0, 0.12); }
+.status-banner {
+    background: rgba(243, 156, 18, 0.15);
+    border: 1px solid rgba(243, 156, 18, 0.4);
+    border-radius: 10px;
+    padding: 15px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+.status-banner.focus { background: rgba(243, 156, 18, 0.15); border-color: rgba(243, 156, 18, 0.4); }
+.status-banner.lockdown { background: rgba(192, 57, 43, 0.1); border-color: rgba(192, 57, 43, 0.3); }
+.status-banner .title { font-weight: 600; margin-bottom: 5px; color: #2d3436; }
+.status-banner .time { font-size: 0.9rem; color: #7f8c8d; }
+.status-banner button { margin-top: 10px; padding: 8px 20px; font-size: 0.85rem; }
 </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <a href="/stats" class="stats-link">Stats</a>
-        <h1>Gatekeeper Chat</h1>
+        <div class="nav-links">
+            <a href="/stats" class="nav-link">Stats</a>
+            <a href="/settings" class="nav-link">Settings</a>
+        </div>
+        <h1>Gatekeeper</h1>
         <span class="time-badge" id="currentTime"></span>
-        <p>Daytime mode - internet is open. Just here to chat!</p>
+        <p>Daytime mode - internet is open</p>
     </div>
+
+    <div id="statusBanner" class="status-banner hidden"></div>
+
+    <div class="mode-buttons" id="modeButtons">
+        <button class="mode-btn focus" onclick="showFocusModal()">
+            <span class="icon">🎯</span>
+            <span class="label">Focus Mode</span>
+        </button>
+        <button class="mode-btn lockdown" onclick="showLockdownModal()">
+            <span class="icon">🔒</span>
+            <span class="label">Lock Internet</span>
+        </button>
+    </div>
+
     <div class="chat-container" id="chatContainer">
         <div class="message assistant" id="initialMessage">
-            Good morning! It's daytime so the internet is open - no gatekeeper needed right now. But I'm still here if you want to chat! How can I help you today?
+            Hi! Internet is open right now. Need to focus? Use Focus Mode to block distracting sites, or Lock Internet to block everything until you provide a good reason.
         </div>
     </div>
     <div class="loading" id="loading">
@@ -1075,10 +1384,68 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
         <span>Thinking...</span>
     </div>
     <div class="input-area" id="inputArea">
-        <textarea id="userInput" placeholder="Ask me anything..."></textarea>
+        <textarea id="userInput" placeholder="Chat with me..."></textarea>
         <button type="button" id="sendBtn">Send</button>
     </div>
 </div>
+
+<!-- Focus Mode Modal -->
+<div class="modal" id="focusModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>🎯 Focus Mode</h2>
+            <p style="color: #a0a0a0; margin-top: 10px; font-size: 0.9rem;">Block distracting sites (YouTube, Instagram, Twitter, etc.)</p>
+        </div>
+        <div class="form-group">
+            <label>Duration</label>
+            <select id="focusDuration">
+                <option value="15">15 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60" selected>1 hour</option>
+                <option value="120">2 hours</option>
+                <option value="180">3 hours</option>
+                <option value="until_night">Until 9pm</option>
+            </select>
+        </div>
+        <div class="btn-row">
+            <button class="btn-cancel" onclick="closeModal('focusModal')">Cancel</button>
+            <button onclick="startFocusMode()">Start Focus</button>
+        </div>
+    </div>
+</div>
+
+<!-- Lockdown Modal -->
+<div class="modal" id="lockdownModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>🔒 Lock Internet</h2>
+            <p style="color: #a0a0a0; margin-top: 10px; font-size: 0.9rem;">Block all internet. You'll need to explain why to get it back.</p>
+        </div>
+        <div class="form-group">
+            <label>Duration</label>
+            <select id="lockdownDuration">
+                <option value="15">15 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60" selected>1 hour</option>
+                <option value="120">2 hours</option>
+                <option value="until_night">Until 9pm</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Why are you locking? (helps the AI understand)</label>
+            <input type="text" id="lockdownReason" placeholder="e.g., Need to study for exam">
+        </div>
+        <div class="form-group">
+            <label>Exceptions (what would be a valid reason to unlock?)</label>
+            <input type="text" id="lockdownExceptions" placeholder="e.g., Work emergency, family call">
+        </div>
+        <div class="btn-row">
+            <button class="btn-cancel" onclick="closeModal('lockdownModal')">Cancel</button>
+            <button onclick="startLockdown()" style="background: #ff6b6b;">Lock Internet</button>
+        </div>
+    </div>
+</div>
+
 <script>
 var sessionId = null;
 
@@ -1087,11 +1454,91 @@ function updateTime() {
     var h = now.getHours(), m = now.getMinutes();
     var ampm = h >= 12 ? 'PM' : 'AM';
     var h12 = h % 12 || 12;
-    var timeStr = h12 + ':' + (m<10?'0':'') + m + ' ' + ampm;
-    document.getElementById('currentTime').textContent = timeStr;
+    document.getElementById('currentTime').textContent = h12 + ':' + (m<10?'0':'') + m + ' ' + ampm;
 }
 updateTime();
 setInterval(updateTime, 60000);
+
+function showFocusModal() { document.getElementById('focusModal').className = 'modal active'; }
+function showLockdownModal() { document.getElementById('lockdownModal').className = 'modal active'; }
+function closeModal(id) { document.getElementById(id).className = 'modal'; }
+
+function startFocusMode() {
+    var duration = document.getElementById('focusDuration').value;
+    closeModal('focusModal');
+    addMessage('Starting focus mode...', 'system');
+
+    fetch('/api/focus', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'start', duration: duration})
+    }).then(r => r.json()).then(data => {
+        if (data.success) {
+            addMessage('Focus mode activated! Distracting sites are now blocked.', 'success');
+            updateStatus();
+        } else {
+            addMessage('Error: ' + data.message, 'system');
+        }
+    });
+}
+
+function startLockdown() {
+    var duration = document.getElementById('lockdownDuration').value;
+    var reason = document.getElementById('lockdownReason').value;
+    var exceptions = document.getElementById('lockdownExceptions').value;
+    closeModal('lockdownModal');
+    addMessage('Locking internet...', 'system');
+
+    fetch('/api/lockdown', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'start', duration: duration, reason: reason, exceptions: exceptions})
+    }).then(r => r.json()).then(data => {
+        if (data.success) {
+            addMessage('Internet locked! You will need to provide a good reason to unlock.', 'success');
+            setTimeout(function() { window.location.reload(); }, 1500);
+        } else {
+            addMessage('Error: ' + data.message, 'system');
+        }
+    });
+}
+
+function stopMode(mode) {
+    fetch('/api/' + mode, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'stop'})
+    }).then(r => r.json()).then(data => {
+        if (data.success) {
+            addMessage(mode.charAt(0).toUpperCase() + mode.slice(1) + ' mode disabled.', 'success');
+            updateStatus();
+        }
+    });
+}
+
+function updateStatus() {
+    fetch('/api/status').then(r => r.json()).then(data => {
+        var banner = document.getElementById('statusBanner');
+        var buttons = document.getElementById('modeButtons');
+
+        if (data.focus_mode_active) {
+            var expiry = new Date(data.focus_mode_expiry * 1000);
+            banner.className = 'status-banner focus';
+            banner.innerHTML = '<div class="title">🎯 Focus Mode Active</div>' +
+                '<div class="time">Until ' + expiry.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'}) + '</div>' +
+                '<button onclick="stopMode(\\'focus\\')">Stop Focus Mode</button>';
+            buttons.style.display = 'none';
+        } else if (data.voluntary_lockdown_active) {
+            buttons.style.display = 'none';
+            banner.className = 'status-banner hidden';
+        } else {
+            banner.className = 'status-banner hidden';
+            buttons.style.display = 'grid';
+        }
+    });
+}
+updateStatus();
+setInterval(updateStatus, 30000);
 
 function addMessage(content, type) {
     var container = document.getElementById('chatContainer');
@@ -1116,40 +1563,184 @@ function sendMessage() {
     input.value = '';
     setLoading(true);
 
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/daychat', true);
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.onreadystatechange = function() {
-        if (xhr.readyState === 4) {
-            setLoading(false);
-            try {
-                var data = JSON.parse(xhr.responseText);
-                if (data.session_id) sessionId = data.session_id;
-                if (data.message) {
-                    addMessage(data.message, 'assistant');
-                }
-                if (data.status === 'error') {
-                    addMessage('Error: ' + data.message, 'system');
-                }
-            } catch(e) {
-                addMessage('Connection error. Please try again.', 'system');
-            }
-        }
-    };
-    xhr.onerror = function() {
+    fetch('/daychat', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId, message: message})
+    }).then(r => r.json()).then(data => {
         setLoading(false);
-        addMessage('Network error. Please try again.', 'system');
-    };
-    xhr.send(JSON.stringify({session_id: sessionId, message: message}));
+        if (data.session_id) sessionId = data.session_id;
+        if (data.message) addMessage(data.message, 'assistant');
+        if (data.status === 'error') addMessage('Error: ' + data.message, 'system');
+    }).catch(e => {
+        setLoading(false);
+        addMessage('Connection error.', 'system');
+    });
 }
 
 document.getElementById('sendBtn').onclick = sendMessage;
 document.getElementById('userInput').onkeydown = function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 };
+</script>
+</body>
+</html>"""
+
+SETTINGS_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gatekeeper Settings</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    min-height: 100vh;
+    padding: 20px;
+    color: #e4e4e4;
+}}
+.container {{ max-width: 600px; margin: 0 auto; }}
+.header {{ text-align: center; margin-bottom: 30px; }}
+.header h1 {{ font-size: 1.8rem; color: #fff; margin-bottom: 10px; }}
+.back-link {{
+    display: inline-block;
+    margin-bottom: 20px;
+    color: #4a69bd;
+    text-decoration: none;
+    font-size: 0.9rem;
+}}
+.back-link:hover {{ text-decoration: underline; }}
+.section {{
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 15px;
+    padding: 25px;
+    margin-bottom: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.section h2 {{ font-size: 1.2rem; margin-bottom: 15px; color: #fff; }}
+.section p {{ color: #a0a0a0; font-size: 0.9rem; margin-bottom: 15px; }}
+.domain-list {{
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 10px;
+    padding: 15px;
+    margin-bottom: 15px;
+    max-height: 200px;
+    overflow-y: auto;
+}}
+.domain-item {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}}
+.domain-item:last-child {{ border-bottom: none; }}
+.domain-item button {{
+    padding: 5px 10px;
+    font-size: 0.8rem;
+    background: rgba(255, 107, 107, 0.2);
+    color: #ff6b6b;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}}
+.domain-item button:hover {{ background: rgba(255, 107, 107, 0.3); }}
+.add-domain {{
+    display: flex;
+    gap: 10px;
+}}
+.add-domain input {{
+    flex: 1;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    font-size: 1rem;
+}}
+.add-domain input:focus {{ outline: 2px solid #4a69bd; }}
+.add-domain button {{
+    padding: 12px 20px;
+    border: none;
+    border-radius: 8px;
+    background: #4a69bd;
+    color: #fff;
+    cursor: pointer;
+}}
+.add-domain button:hover {{ background: #3c5aa6; }}
+.message {{
+    padding: 15px;
+    border-radius: 10px;
+    margin-bottom: 15px;
+    text-align: center;
+}}
+.message.success {{ background: rgba(46, 213, 115, 0.15); color: #2ed573; }}
+.message.error {{ background: rgba(255, 107, 107, 0.15); color: #ff6b6b; }}
+.hidden {{ display: none; }}
+</style>
+</head>
+<body>
+<div class="container">
+    <a href="/" class="back-link">&larr; Back</a>
+    <div class="header">
+        <h1>Settings</h1>
+    </div>
+
+    <div id="message" class="message hidden"></div>
+
+    <div class="section">
+        <h2>Focus Mode Domains</h2>
+        <p>These sites will be blocked when Focus Mode is active.</p>
+        <div class="domain-list" id="domainList">
+            {domain_list}
+        </div>
+        <div class="add-domain">
+            <input type="text" id="newDomain" placeholder="example.com">
+            <button onclick="addDomain()">Add</button>
+        </div>
+    </div>
+</div>
+<script>
+function showMessage(text, type) {{
+    var msg = document.getElementById('message');
+    msg.textContent = text;
+    msg.className = 'message ' + type;
+    setTimeout(function() {{ msg.className = 'message hidden'; }}, 3000);
+}}
+
+function removeDomain(domain) {{
+    fetch('/api/settings', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'remove_domain', domain: domain}})
+    }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+            location.reload();
+        }} else {{
+            showMessage('Error: ' + data.message, 'error');
+        }}
+    }});
+}}
+
+function addDomain() {{
+    var input = document.getElementById('newDomain');
+    var domain = input.value.trim().toLowerCase();
+    if (!domain) return;
+
+    fetch('/api/settings', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'add_domain', domain: domain}})
+    }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+            location.reload();
+        }} else {{
+            showMessage('Error: ' + data.message, 'error');
+        }}
+    }});
+}}
 </script>
 </body>
 </html>"""
@@ -1729,6 +2320,23 @@ def render_stats_page():
     )
 
 
+def render_settings_page():
+    """Render the settings HTML page."""
+    domains = get_focus_domains()
+
+    # Build domain list HTML
+    domain_items = []
+    for domain in sorted(set(domains)):
+        domain_items.append(
+            f'<div class="domain-item"><span>{domain}</span>'
+            f'<button onclick="removeDomain(\'{domain}\')">Remove</button></div>'
+        )
+
+    domain_list = '\n'.join(domain_items) if domain_items else '<p style="color: #666;">No domains configured</p>'
+
+    return SETTINGS_HTML.format(domain_list=domain_list)
+
+
 class GatekeeperHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the captive portal."""
     timeout = 30  # Socket timeout in seconds
@@ -1778,8 +2386,19 @@ Success
             self.send_html(render_stats_page())
             return
 
+        # Settings page
+        if parsed.path == "/settings":
+            self.send_html(render_settings_page())
+            return
+
+        # API status endpoint
+        if parsed.path == "/api/status":
+            self.send_json(get_status())
+            return
+
         # Main page: serve nighttime splash or daytime chat based on time
-        if is_nighttime():
+        # During voluntary lockdown, show the nighttime splash instead
+        if is_nighttime() or voluntary_lockdown_active:
             self.send_html(SPLASH_HTML)
         else:
             self.send_html(DAYTIME_HTML)
@@ -1820,11 +2439,12 @@ p { color: #a0a0a0; }
         self.send_html(success_html)
 
     def do_POST(self):
-        """Handle POST requests - chat API."""
+        """Handle POST requests - chat API and control endpoints."""
         client_ip = self.client_address[0]
         parsed = urllib.parse.urlparse(self.path)
 
-        if parsed.path not in ["/chat", "/daychat"]:
+        valid_paths = ["/chat", "/daychat", "/api/focus", "/api/lockdown", "/api/settings"]
+        if parsed.path not in valid_paths:
             self.send_json({"status": "error", "message": "Not found"}, 404)
             return
 
@@ -1865,8 +2485,100 @@ p { color: #a0a0a0; }
 
         if parsed.path == "/daychat":
             self.handle_daychat(data, client_ip)
+        elif parsed.path == "/api/focus":
+            self.handle_focus_api(data)
+        elif parsed.path == "/api/lockdown":
+            self.handle_lockdown_api(data)
+        elif parsed.path == "/api/settings":
+            self.handle_settings_api(data)
         else:
             self.handle_chat(data, client_ip)
+
+    def handle_focus_api(self, data):
+        """Handle focus mode API requests."""
+        action = data.get("action")
+
+        if action == "start":
+            duration = data.get("duration", "60")
+            if duration == "until_night":
+                minutes = get_minutes_until_daytime_end()
+            else:
+                minutes = int(duration)
+
+            if minutes <= 0:
+                self.send_json({"success": False, "message": "Invalid duration"})
+                return
+
+            enable_focus_mode(minutes)
+            self.send_json({"success": True})
+
+        elif action == "stop":
+            disable_focus_mode()
+            self.send_json({"success": True})
+
+        else:
+            self.send_json({"success": False, "message": "Invalid action"})
+
+    def handle_lockdown_api(self, data):
+        """Handle voluntary lockdown API requests."""
+        action = data.get("action")
+
+        if action == "start":
+            duration = data.get("duration", "60")
+            reason = data.get("reason", "")
+            exceptions = data.get("exceptions", "")
+
+            if duration == "until_night":
+                minutes = get_minutes_until_daytime_end()
+            else:
+                minutes = int(duration)
+
+            if minutes <= 0:
+                self.send_json({"success": False, "message": "Invalid duration"})
+                return
+
+            enable_voluntary_lockdown(minutes, reason, exceptions)
+            self.send_json({"success": True})
+
+        elif action == "stop":
+            disable_voluntary_lockdown()
+            self.send_json({"success": True})
+
+        else:
+            self.send_json({"success": False, "message": "Invalid action"})
+
+    def handle_settings_api(self, data):
+        """Handle settings API requests."""
+        action = data.get("action")
+
+        if action == "add_domain":
+            domain = data.get("domain", "").strip().lower()
+            if not domain:
+                self.send_json({"success": False, "message": "Domain required"})
+                return
+
+            domains = get_focus_domains()
+            if domain not in domains:
+                domains.append(domain)
+                # Also add www variant if not present
+                if not domain.startswith("www."):
+                    www_domain = "www." + domain
+                    if www_domain not in domains:
+                        domains.append(www_domain)
+                set_focus_domains(domains)
+
+            self.send_json({"success": True})
+
+        elif action == "remove_domain":
+            domain = data.get("domain", "").strip().lower()
+            domains = get_focus_domains()
+            # Remove domain and its www variant
+            domains = [d for d in domains if d != domain and d != "www." + domain and d != domain.replace("www.", "")]
+            set_focus_domains(domains)
+            self.send_json({"success": True})
+
+        else:
+            self.send_json({"success": False, "message": "Invalid action"})
 
     def handle_chat(self, data, client_ip):
         """Handle chat message and LLM interaction."""
@@ -2141,6 +2853,8 @@ def expiry_checker_thread():
         time.sleep(30)
         try:
             check_expired_sessions()
+            check_focus_mode_expiry()
+            check_voluntary_lockdown_expiry()
         except Exception as e:
             log(f"Error in expiry checker: {e}")
 
