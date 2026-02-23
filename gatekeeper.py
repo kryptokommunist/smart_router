@@ -1437,9 +1437,9 @@ def render_time_chart(time_distribution):
 
     # Chart dimensions (viewBox coordinates)
     width = 500
-    height = 170
+    height = 200
     padding_left = 45
-    padding_bottom = 25
+    padding_bottom = 45
     padding_top = 10
     padding_right = 10
 
@@ -1473,11 +1473,11 @@ def render_time_chart(time_distribution):
     time_labels = [(21, "9pm"), (23, "11pm"), (1, "1am"), (3, "3am"), (5, "5am")]
     for hour, label in time_labels:
         x = hour_to_x(hour)
-        svg_parts.append(f'<text class="axis-label" x="{x}" y="{height - 5}" text-anchor="middle">{label}</text>')
+        svg_parts.append(f'<text class="axis-label" x="{x}" y="{height - padding_bottom + 18}" text-anchor="middle">{label}</text>')
 
     # Axis titles
-    svg_parts.append(f'<text class="axis-title" x="{width / 2}" y="{height}" text-anchor="middle">Time of Night</text>')
-    svg_parts.append(f'<text class="axis-title" x="12" y="{height / 2}" text-anchor="middle" transform="rotate(-90, 12, {height / 2})">Duration (min)</text>')
+    svg_parts.append(f'<text class="axis-title" x="{width / 2}" y="{height - 5}" text-anchor="middle">Time of Night</text>')
+    svg_parts.append(f'<text class="axis-title" x="12" y="{(height - padding_bottom) / 2 + padding_top}" text-anchor="middle" transform="rotate(-90, 12, {(height - padding_bottom) / 2 + padding_top})">Duration (min)</text>')
 
     # Data points
     for point in time_distribution:
