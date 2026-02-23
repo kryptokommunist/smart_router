@@ -562,7 +562,7 @@ SPLASH_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Internet Access Request</title>
+<title>Open Sesame</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -737,7 +737,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 <div class="container">
     <div class="header">
         <a href="/stats" class="stats-link">Stats</a>
-        <h1>Nighttime Access Request</h1>
+        <h1>Open Sesame</h1>
         <span class="time-badge" id="currentTime"></span>
         <p>It's late. Please explain why you need internet access right now.</p>
     </div>
@@ -933,15 +933,15 @@ STATS_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gatekeeper Stats</title>
+<title>Open Sesame - Stats</title>
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    background: {bg_gradient};
     min-height: 100vh;
     padding: 20px;
-    color: #e4e4e4;
+    color: {text_color};
 }}
 .container {{
     max-width: 800px;
@@ -951,12 +951,12 @@ body {{
     text-align: center;
     margin-bottom: 30px;
 }}
-.header h1 {{ font-size: 1.8rem; color: #fff; margin-bottom: 10px; }}
-.header p {{ color: #a0a0a0; }}
+.header h1 {{ font-size: 1.8rem; color: {heading_color}; margin-bottom: 10px; }}
+.header p {{ color: {muted_color}; }}
 .back-link {{
     display: inline-block;
     margin-bottom: 20px;
-    color: #4a69bd;
+    color: {accent_color};
     text-decoration: none;
     font-size: 0.9rem;
 }}
@@ -968,41 +968,41 @@ body {{
     margin-bottom: 30px;
 }}
 .stat-card {{
-    background: rgba(255, 255, 255, 0.05);
+    background: {card_bg};
     backdrop-filter: blur(10px);
     border-radius: 15px;
     padding: 25px;
     text-align: center;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid {border_color};
 }}
 .stat-card .number {{
     font-size: 2.5rem;
     font-weight: 700;
-    color: #4a69bd;
+    color: {accent_color};
     margin-bottom: 5px;
 }}
 .stat-card .label {{
     font-size: 0.9rem;
-    color: #a0a0a0;
+    color: {muted_color};
 }}
 .chart-section {{
-    background: rgba(255, 255, 255, 0.05);
+    background: {card_bg};
     backdrop-filter: blur(10px);
     border-radius: 15px;
     padding: 25px;
     margin-bottom: 30px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid {border_color};
 }}
 .chart-section h2 {{
     font-size: 1.2rem;
     margin-bottom: 20px;
-    color: #fff;
+    color: {heading_color};
 }}
 .chart-container {{
     position: relative;
     width: 100%;
     height: 250px;
-    background: rgba(0, 0, 0, 0.2);
+    background: {chart_bg};
     border-radius: 10px;
     padding: 40px 50px 40px 60px;
 }}
@@ -1011,22 +1011,22 @@ body {{
     height: 100%;
 }}
 .axis-label {{
-    fill: #a0a0a0;
+    fill: {muted_color};
     font-size: 11px;
 }}
 .axis-title {{
-    fill: #a0a0a0;
+    fill: {muted_color};
     font-size: 12px;
 }}
 .grid-line {{
-    stroke: rgba(255, 255, 255, 0.1);
+    stroke: {grid_color};
     stroke-width: 1;
 }}
 .data-point {{
     opacity: 0.7;
 }}
 .data-point.approved {{
-    fill: #4a69bd;
+    fill: {accent_color};
 }}
 .data-point.denied {{
     fill: #ff6b6b;
@@ -1039,7 +1039,7 @@ body {{
     opacity: 0.8;
 }}
 .bar.approved {{
-    fill: #4a69bd;
+    fill: {accent_color};
 }}
 .bar.denied {{
     fill: #ff6b6b;
@@ -1048,16 +1048,16 @@ body {{
     opacity: 1;
 }}
 .recent-section {{
-    background: rgba(255, 255, 255, 0.05);
+    background: {card_bg};
     backdrop-filter: blur(10px);
     border-radius: 15px;
     padding: 25px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid {border_color};
 }}
 .recent-section h2 {{
     font-size: 1.2rem;
     margin-bottom: 20px;
-    color: #fff;
+    color: {heading_color};
 }}
 .history-table {{
     width: 100%;
@@ -1128,7 +1128,7 @@ body {{
 <div class="container">
     <a href="/" class="back-link">&larr; Back to Portal</a>
     <div class="header">
-        <h1>Gatekeeper Stats</h1>
+        <h1>Open Sesame Stats</h1>
         <p>Exception history across all sessions</p>
     </div>
     <div class="stats-cards">
@@ -1170,7 +1170,7 @@ DAYTIME_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gatekeeper - Daytime</title>
+<title>Open Sesame - Daytime</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -1356,7 +1356,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
             <a href="/stats" class="nav-link">Stats</a>
             <a href="/settings" class="nav-link">Settings</a>
         </div>
-        <h1>Gatekeeper</h1>
+        <h1>Open Sesame</h1>
         <span class="time-badge" id="currentTime"></span>
         <p>Daytime mode - internet is open</p>
     </div>
@@ -1591,38 +1591,39 @@ SETTINGS_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gatekeeper Settings</title>
+<title>Open Sesame - Settings</title>
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    background: {bg_gradient};
     min-height: 100vh;
     padding: 20px;
-    color: #e4e4e4;
+    color: {text_color};
 }}
 .container {{ max-width: 600px; margin: 0 auto; }}
 .header {{ text-align: center; margin-bottom: 30px; }}
-.header h1 {{ font-size: 1.8rem; color: #fff; margin-bottom: 10px; }}
+.header h1 {{ font-size: 1.8rem; color: {heading_color}; margin-bottom: 10px; }}
 .back-link {{
     display: inline-block;
     margin-bottom: 20px;
-    color: #4a69bd;
+    color: {accent_color};
     text-decoration: none;
     font-size: 0.9rem;
 }}
 .back-link:hover {{ text-decoration: underline; }}
 .section {{
-    background: rgba(255, 255, 255, 0.05);
+    background: {card_bg};
+    backdrop-filter: blur(10px);
     border-radius: 15px;
     padding: 25px;
     margin-bottom: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid {border_color};
 }}
-.section h2 {{ font-size: 1.2rem; margin-bottom: 15px; color: #fff; }}
-.section p {{ color: #a0a0a0; font-size: 0.9rem; margin-bottom: 15px; }}
+.section h2 {{ font-size: 1.2rem; margin-bottom: 15px; color: {heading_color}; }}
+.section p {{ color: {muted_color}; font-size: 0.9rem; margin-bottom: 15px; }}
 .domain-list {{
-    background: rgba(0, 0, 0, 0.2);
+    background: {chart_bg};
     border-radius: 10px;
     padding: 15px;
     margin-bottom: 15px;
@@ -1634,7 +1635,7 @@ body {{
     justify-content: space-between;
     align-items: center;
     padding: 8px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid {border_color};
 }}
 .domain-item:last-child {{ border-bottom: none; }}
 .domain-item button {{
@@ -1656,20 +1657,20 @@ body {{
     padding: 12px;
     border: none;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
+    background: {input_bg};
+    color: {input_color};
     font-size: 1rem;
 }}
-.add-domain input:focus {{ outline: 2px solid #4a69bd; }}
+.add-domain input:focus {{ outline: 2px solid {accent_color}; }}
 .add-domain button {{
     padding: 12px 20px;
     border: none;
     border-radius: 8px;
-    background: #4a69bd;
+    background: {accent_color};
     color: #fff;
     cursor: pointer;
 }}
-.add-domain button:hover {{ background: #3c5aa6; }}
+.add-domain button:hover {{ opacity: 0.9; }}
 .message {{
     padding: 15px;
     border-radius: 10px;
@@ -1764,6 +1765,38 @@ def is_nighttime():
     """Check if current time is nighttime (9pm-5am)."""
     hour = datetime.now().hour
     return hour >= 21 or hour < 5
+
+
+def get_theme_vars():
+    """Get theme variables based on time of day (night=dark, day=golden)."""
+    if is_nighttime():
+        return {
+            'bg_gradient': 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+            'text_color': '#e4e4e4',
+            'heading_color': '#fff',
+            'accent_color': '#4a69bd',
+            'muted_color': '#a0a0a0',
+            'card_bg': 'rgba(255, 255, 255, 0.05)',
+            'border_color': 'rgba(255, 255, 255, 0.1)',
+            'chart_bg': 'rgba(0, 0, 0, 0.3)',
+            'grid_color': 'rgba(255, 255, 255, 0.1)',
+            'input_bg': 'rgba(255, 255, 255, 0.1)',
+            'input_color': '#fff',
+        }
+    else:
+        return {
+            'bg_gradient': 'linear-gradient(135deg, #fef9e7 0%, #fdeaa8 50%, #f6d365 100%)',
+            'text_color': '#2d3436',
+            'heading_color': '#d35400',
+            'accent_color': '#e67e22',
+            'muted_color': '#7f8c8d',
+            'card_bg': 'rgba(255, 255, 255, 0.85)',
+            'border_color': 'rgba(255, 255, 255, 0.5)',
+            'chart_bg': 'rgba(0, 0, 0, 0.05)',
+            'grid_color': 'rgba(0, 0, 0, 0.1)',
+            'input_bg': 'rgba(0, 0, 0, 0.05)',
+            'input_color': '#2d3436',
+        }
 
 
 def log(message):
@@ -2310,13 +2343,15 @@ def render_stats_page():
     else:
         history_table = '<div class="empty-state">No exceptions recorded yet</div>'
 
+    theme = get_theme_vars()
     return STATS_HTML.format(
         total_approved=stats['total_approved'],
         total_denied=stats['total_denied'],
         total_hours=total_hours,
         time_chart=time_chart,
         weekday_chart=weekday_chart,
-        history_table=history_table
+        history_table=history_table,
+        **theme
     )
 
 
@@ -2334,7 +2369,8 @@ def render_settings_page():
 
     domain_list = '\n'.join(domain_items) if domain_items else '<p style="color: #666;">No domains configured</p>'
 
-    return SETTINGS_HTML.format(domain_list=domain_list)
+    theme = get_theme_vars()
+    return SETTINGS_HTML.format(domain_list=domain_list, **theme)
 
 
 class GatekeeperHandler(BaseHTTPRequestHandler):
