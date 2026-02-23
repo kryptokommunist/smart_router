@@ -80,8 +80,11 @@ Both features have configurable durations (15 min to end-of-day).
 smart_router/
 ├── README.md                 # This file
 ├── ROUTER_SETUP.md           # Reproducible setup instructions
-├── gatekeeper.py             # Main Python server (~3000 lines)
+├── CLAUDE.md                 # Development context
+├── gatekeeper.py             # Main Python server (~3300 lines)
 ├── logo.png                  # Project logo
+├── config/
+│   └── gatekeeper.secrets.example  # API key file format
 └── init.d/
     └── gatekeeper            # OpenWrt startup script
 ```
