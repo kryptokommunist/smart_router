@@ -1,7 +1,7 @@
-# LLM Gatekeeper for GL-MT3000
+# Open Sesame - LLM Gatekeeper for GL-MT3000
 
 <p align="center">
-  <img src="logo.png" alt="LLM Gatekeeper Logo" width="400">
+  <img src="logo.png" alt="Open Sesame Logo" width="400">
 </p>
 
 <p align="center">
@@ -80,7 +80,7 @@ Both features have configurable durations (15 min to end-of-day).
 smart_router/
 ├── README.md                 # This file
 ├── ROUTER_SETUP.md           # Reproducible setup instructions
-├── gatekeeper.py             # Main Python server (~2600 lines)
+├── gatekeeper.py             # Main Python server (~3000 lines)
 ├── logo.png                  # Project logo
 └── init.d/
     └── gatekeeper            # OpenWrt startup script
@@ -169,7 +169,7 @@ ssh root@192.168.0.2 "python3 /root/gatekeeper.py --server"
 
 ## How the AI Decides
 
-The gatekeeper AI acts like a **warm, loving parent** - genuinely caring about your wellbeing while maintaining firm boundaries. It wants you to get good sleep because rest matters for your health and success.
+The Open Sesame AI acts like a **warm, loving parent** - genuinely caring about your wellbeing while maintaining firm boundaries. It wants you to get good sleep because rest matters for your health and success.
 
 ### Behavior
 1. **Warmly asks** how much time you need
@@ -195,12 +195,23 @@ Example denial: *"I know it feels important right now, but this can wait until m
 
 ## Stats Dashboard
 
-The `/stats` page shows:
-- **Total approved/denied** requests
-- **Hours granted** (cumulative)
-- **Time distribution chart** - scatter plot of when exceptions occur (9pm-5am) vs duration
-- **Weekday distribution** - bar chart showing patterns by day of week
-- **Recent requests** - last 20 with timestamps and results
+The `/stats` page shows comprehensive statistics with tabbed views:
+
+### Nighttime Stats (9pm-5am)
+- **Approved/Denied** request counts
+- **Night Hours** granted (cumulative)
+- **Time Distribution** - scatter plot showing when exceptions were requested
+- **Weekday Distribution** - bar chart with approved (blue) vs denied (red)
+
+### Daytime Stats (5am-9pm)
+- **Focus Sessions** - count of Focus Mode activations
+- **Lockdowns** - count of voluntary internet lockdowns
+- **Day Hours** - total time spent in Focus Mode + Lockdown
+- **Time Distribution** - scatter plot of Focus (orange) and Lockdown (purple) usage
+- **Weekday Distribution** - bar chart showing patterns
+
+### Recent Activity
+Shows the last 20 events across all modes with color-coded badges.
 
 All stats persist across reboots in `/root/gatekeeper_history.json`.
 

@@ -1,6 +1,6 @@
 # Router Setup Guide
 
-Complete reproducible setup instructions for the LLM Gatekeeper on GL-MT3000.
+Complete reproducible setup instructions for Open Sesame (LLM Gatekeeper) on GL-MT3000.
 
 ## Prerequisites
 
