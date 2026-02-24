@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 
 # Configuration
@@ -473,6 +473,16 @@ def get_minutes_until_daytime_end():
     return int((end_of_daytime - now).total_seconds() / 60)
 
 
+def get_minutes_until_daytime_start():
+    """Get minutes until 5am (start of daytime)."""
+    now = datetime.now()
+    start_of_daytime = now.replace(hour=5, minute=0, second=0, microsecond=0)
+    if now.hour >= 5:
+        # Already past 5am, so daytime starts tomorrow at 5am
+        start_of_daytime = start_of_daytime + timedelta(days=1)
+    return int((start_of_daytime - now).total_seconds() / 60)
+
+
 def get_status():
     """Get current system status."""
     return {
@@ -616,7 +626,16 @@ def get_request_history_for_context():
     if not requests:
         return ""
 
-    history_text = "\n\n## Previous requests tonight:\n"
+    # Calculate total minutes granted tonight
+    total_minutes = sum(req.get('duration', 0) for req in requests if req.get('status') == 'approved')
+    num_requests = len(requests)
+    num_approved = len([r for r in requests if r.get('status') == 'approved'])
+
+    history_text = f"\n\n## Previous requests tonight:\n"
+    history_text += f"**IMPORTANT: Total access granted tonight: {total_minutes} minutes across {num_approved} approved requests.**\n"
+    if total_minutes >= 120:
+        history_text += f"**WARNING: User has already exceeded 120 minutes tonight. DENY any further requests.**\n"
+    history_text += "\nRecent requests:\n"
     for req in requests[-10:]:  # Last 10 requests
         status_emoji = "✓" if req["status"] == "approved" else "✗"
         duration_str = f" ({req.get('duration', '?')} min)" if req["status"] == "approved" else ""
@@ -640,6 +659,14 @@ Think of yourself as a warm, supportive parent who genuinely cares about the per
 - Up to 60 minutes: Work tasks, school assignments that must be done TODAY
 - Up to 120 minutes: Video calls, Zoom meetings, voice calls
 
+## CRITICAL: Duration Cap
+- NEVER grant more time than the user explicitly requests
+- If they ask for 15 minutes, grant AT MOST 15 minutes (or less, or deny)
+- You may grant LESS than requested, but NEVER MORE
+- This is a strict rule - the user wants control over their own time limits
+- HARD LIMIT: If the user's total requests tonight exceed 120 minutes, DENY any further extensions
+- Check the request history - if they've already been granted 120+ minutes total, kindly but firmly deny
+
 ## Your behavior:
 1. ALWAYS ask how much time they need (in minutes) - warmly, not like an interrogation
 2. If they request MORE than 10 minutes:
@@ -649,7 +676,7 @@ Think of yourself as a warm, supportive parent who genuinely cares about the per
 3. You may ask up to 3 clarifying questions total
 4. Most things CAN wait until morning - and that's actually better for them!
 5. Mindless browsing, social media, entertainment = DENY (with love and care)
-6. Legitimate work/emergency = APPROVE with appropriate duration
+6. Legitimate work/emergency = APPROVE with the duration they requested (never more)
 
 ## Proof verification (for requests >10 minutes):
 - When the user uploads an image, analyze it carefully
@@ -675,7 +702,7 @@ or
 
 Example denial tone: "I know it feels important right now, but this can wait until morning. Your sleep tonight will help you tackle it better tomorrow. Sweet dreams!"
 
-Example approval tone: "I understand - that deadline is real and you need to get this done. Here's 45 minutes. I'm proud of you for being responsible about your work. Try to rest after!"
+Example approval tone: "I understand - that deadline is real and you need to get this done. Here's the 15 minutes you asked for. I'm proud of you for being responsible about your work. Try to rest after!"
 
 IMPORTANT: Always respond with valid JSON only. No markdown, no extra text."""
 
@@ -1046,6 +1073,35 @@ document.getElementById('userInput').onkeydown = function(e) {
         sendMessage();
     }
 };
+
+// Load existing session history on page load
+function loadSessionHistory() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/session', true);
+    xhr.onreadystatechange = function() {
+        if (xhr.readyState === 4 && xhr.status === 200) {
+            try {
+                var data = JSON.parse(xhr.responseText);
+                if (data.session_id) {
+                    sessionId = data.session_id;
+                    // Remove initial message if we have history
+                    if (data.history && data.history.length > 0) {
+                        var initialMsg = document.getElementById('initialMessage');
+                        if (initialMsg) initialMsg.remove();
+                        // Restore conversation
+                        data.history.forEach(function(msg) {
+                            addMessage(msg.content, msg.role === 'user' ? 'user' : 'assistant');
+                        });
+                    }
+                }
+            } catch(e) {
+                console.log('Could not load session history');
+            }
+        }
+    };
+    xhr.send();
+}
+loadSessionHistory();
 </script>
 </body>
 </html>"""
@@ -2840,6 +2896,31 @@ Success
             self.send_json(get_status())
             return
 
+        # API session endpoint - get existing conversation history
+        if parsed.path == "/api/session":
+            client_ip = self.client_address[0]
+            # Find session for this IP
+            for sid, sess in sessions.items():
+                if sess["ip"] == client_ip:
+                    # Return conversation history
+                    history = []
+                    for entry in sess.get("history", []):
+                        role = entry.get("role")
+                        content = entry.get("content", "")
+                        if role == "user":
+                            history.append({"role": "user", "content": content})
+                        elif role == "assistant":
+                            # Parse assistant response to get message
+                            try:
+                                parsed_resp = json.loads(content)
+                                history.append({"role": "assistant", "content": parsed_resp.get("message", content)})
+                            except:
+                                history.append({"role": "assistant", "content": content})
+                    self.send_json({"session_id": sid, "history": history})
+                    return
+            self.send_json({"session_id": None, "history": []})
+            return
+
         # Main page: serve nighttime splash or daytime chat based on time
         # During voluntary lockdown, show the nighttime splash instead
         if is_nighttime() or voluntary_lockdown_active:
@@ -3044,10 +3125,14 @@ p { color: #a0a0a0; }
 
         if not session:
             session_id = generate_session_id(mac or "unknown", client_ip)
+            # Create initial greeting message
+            now = datetime.now()
+            time_str = now.strftime("%I:%M %p").lstrip("0")
+            initial_msg = f"Hey there! It's {time_str} - getting late! I want to make sure you get good rest tonight. What brings you here - is there something that really can't wait until morning?"
             session = {
                 "mac": mac,
                 "ip": client_ip,
-                "history": [],
+                "history": [{"role": "assistant", "content": json.dumps({"status": "question", "message": initial_msg})}],
                 "questions_asked": 0
             }
             sessions[session_id] = session
@@ -3076,6 +3161,8 @@ p { color: #a0a0a0; }
                 response = call_gemini(session["history"])
 
         if response.get("status") == "approved":
+            # Add approval to session history for display
+            session["history"].append({"role": "assistant", "content": json.dumps(response)})
             mac_addr = session["mac"]
             duration = min(response.get("duration", 10), 120)
 
@@ -3093,6 +3180,8 @@ p { color: #a0a0a0; }
                 response = {"status": "error", "message": "Failed to grant access. Please try again."}
 
         elif response.get("status") == "denied":
+            # Add denial to session history for display
+            session["history"].append({"role": "assistant", "content": json.dumps(response)})
             log(f"Access denied for {session['mac']}: {response.get('message', 'No reason')}")
             # Log to persistent request log (short summary)
             first_message = session["history"][0]["content"] if session["history"] else "Unknown"
@@ -3277,6 +3366,12 @@ def enable_gatekeeper():
     subprocess.run(["/etc/init.d/nodogsplash", "stop"], capture_output=True, check=False)
     setup_firewall()
     kick_wifi_clients()
+    # Also enable Focus Mode during nighttime to block distracting sites
+    if not focus_mode_active:
+        minutes_until_morning = get_minutes_until_daytime_start()
+        if minutes_until_morning > 0:
+            log(f"Auto-enabling Focus Mode for nighttime ({minutes_until_morning} minutes until morning)")
+            enable_focus_mode(minutes_until_morning)
     log("Gatekeeper mode enabled")
 
 
