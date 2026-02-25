@@ -32,6 +32,7 @@ REQUEST_LOG_FILE = "/tmp/gatekeeper_requests.json"  # Temporary log for the nigh
 CONVERSATION_LOG_FILE = "/tmp/gatekeeper_conversations.json"  # Full conversation log, cleared at daytime
 PERMANENT_LOG_FILE = "/root/gatekeeper_history.json"  # Persistent log across reboots (short summaries)
 SETTINGS_FILE = "/root/gatekeeper_settings.json"  # User settings (focus mode domains, etc.)
+FIREWALL_STATE_FILE = "/tmp/gatekeeper_firewall_state.json"  # Track firewall rules for cleanup on restart
 EXTERNAL_DNS = "8.8.8.8"  # Use Google DNS to bypass local DNS hijacking
 
 # Default focus mode domains
@@ -262,6 +263,98 @@ def set_focus_domains(domains):
     save_settings(settings)
 
 
+# --- Firewall State Functions (persist rules for cleanup on restart) ---
+
+def load_firewall_state():
+    """Load saved firewall state from file."""
+    try:
+        if os.path.exists(FIREWALL_STATE_FILE):
+            with open(FIREWALL_STATE_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        log(f"Error loading firewall state: {e}")
+    return {"focus_blocked_ips": [], "doh_blocked": False, "ipv6_blocked": False, "dns_blocked_domains": []}
+
+
+def save_firewall_state(state):
+    """Save firewall state to file for cleanup on restart."""
+    try:
+        with open(FIREWALL_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        log(f"Error saving firewall state: {e}")
+
+
+def clear_firewall_state():
+    """Clear the firewall state file."""
+    try:
+        if os.path.exists(FIREWALL_STATE_FILE):
+            os.remove(FIREWALL_STATE_FILE)
+            log("Firewall state file cleared")
+    except Exception as e:
+        log(f"Error clearing firewall state: {e}")
+
+
+def cleanup_stale_firewall_rules():
+    """Clean up any firewall rules from a previous run (called on startup)."""
+    state = load_firewall_state()
+    cleaned_anything = False
+
+    # Always try to remove IPv6 block (might exist from before state tracking)
+    for _ in range(5):
+        result = subprocess.run(["ip6tables", "-D", "FORWARD", "-j", "REJECT"],
+                      capture_output=True, check=False)
+        if result.returncode != 0:
+            break
+        cleaned_anything = True
+    if cleaned_anything:
+        log("Removed stale IPv6 block(s)")
+
+    # Always try to remove DoH server blocks (might exist from before state tracking)
+    doh_cleaned = False
+    for doh_ip in DOH_SERVERS:
+        for _ in range(5):
+            r1 = subprocess.run(["iptables", "-D", "FORWARD", "-d", doh_ip, "-p", "tcp", "--dport", "443", "-j", "REJECT"],
+                          capture_output=True, check=False)
+            r2 = subprocess.run(["iptables", "-D", "FORWARD", "-d", doh_ip, "-p", "udp", "--dport", "443", "-j", "REJECT"],
+                          capture_output=True, check=False)
+            if r1.returncode == 0 or r2.returncode == 0:
+                doh_cleaned = True
+            if r1.returncode != 0 and r2.returncode != 0:
+                break
+    if doh_cleaned:
+        log("Removed stale DoH blocks")
+
+    # Remove IP blocks from saved state
+    stale_ips = state.get("focus_blocked_ips", [])
+    if stale_ips:
+        for ip in stale_ips:
+            # Try multiple times since there might be duplicate rules
+            for _ in range(5):
+                result = subprocess.run(["iptables", "-D", "FORWARD", "-d", ip, "-j", "REJECT"],
+                                       capture_output=True, check=False)
+                if result.returncode != 0:
+                    break
+        log(f"Removed {len(stale_ips)} stale IP blocks")
+
+    # Remove DNS blocks from saved state
+    stale_domains = state.get("dns_blocked_domains", [])
+    dns_cleaned = False
+    if stale_domains:
+        for domain in stale_domains:
+            subprocess.run(["uci", "del_list", f"dhcp.@dnsmasq[0].address=/{domain}/0.0.0.0"],
+                          capture_output=True, check=False)
+        subprocess.run(["uci", "commit", "dhcp"], check=False)
+        subprocess.run(["/etc/init.d/dnsmasq", "restart"], check=False)
+        dns_cleaned = True
+        log(f"Removed {len(stale_domains)} stale DNS blocks")
+
+    # Clear the state file after cleanup
+    if stale_ips or cleaned_anything or doh_cleaned or dns_cleaned:
+        clear_firewall_state()
+        log("Stale firewall rules cleanup complete")
+
+
 # --- Focus Mode Functions ---
 
 def resolve_domain_ips(domain):
@@ -330,6 +423,14 @@ def enable_focus_mode(duration_minutes):
     for ip in focus_mode_blocked_ips:
         subprocess.run(["iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "REJECT"], check=False)
 
+    # Save firewall state for cleanup on restart
+    save_firewall_state({
+        "focus_blocked_ips": list(focus_mode_blocked_ips),
+        "doh_blocked": True,
+        "ipv6_blocked": True,
+        "dns_blocked_domains": domains
+    })
+
     log(f"Focus mode enabled, blocked {len(focus_mode_blocked_ips)} IPs + DoH servers + IPv6")
 
     # Log to permanent history
@@ -376,9 +477,11 @@ def disable_focus_mode():
     subprocess.run(["uci", "commit", "dhcp"], check=False)
     subprocess.run(["/etc/init.d/dnsmasq", "restart"], check=False)
 
-    # Remove IP blocks from firewall - re-resolve domains to get IPs
-    # (in case focus_mode_blocked_ips is empty after restart)
+    # Remove IP blocks from firewall - use saved state + re-resolve to be thorough
+    # Load saved state in case focus_mode_blocked_ips is empty after restart
+    saved_state = load_firewall_state()
     ips_to_unblock = set(focus_mode_blocked_ips)
+    ips_to_unblock.update(saved_state.get("focus_blocked_ips", []))
     for domain in domains:
         ips_to_unblock.update(resolve_domain_ips(domain))
 
@@ -389,6 +492,9 @@ def disable_focus_mode():
                                    capture_output=True, check=False)
             if result.returncode != 0:
                 break
+
+    # Clear firewall state file
+    clear_firewall_state()
 
     focus_mode_active = False
     focus_mode_expiry = None
@@ -634,7 +740,7 @@ def get_request_history_for_context():
     history_text = f"\n\n## Previous requests tonight:\n"
     history_text += f"**IMPORTANT: Total access granted tonight: {total_minutes} minutes across {num_approved} approved requests.**\n"
     if total_minutes >= 120:
-        history_text += f"**WARNING: User has already exceeded 120 minutes tonight. DENY any further requests.**\n"
+        history_text += f"**WARNING: User has already exceeded 120 minutes tonight. You MUST DENY any further requests. Be firm but kind.**\n"
     history_text += "\nRecent requests:\n"
     for req in requests[-10:]:  # Last 10 requests
         status_emoji = "✓" if req["status"] == "approved" else "✗"
@@ -3379,9 +3485,10 @@ def disable_gatekeeper():
     """Disable captive portal - open access."""
     log("Disabling gatekeeper mode (open access)...")
     teardown_firewall()
-    # Clear the nightly logs for the new day
-    clear_request_log()
-    clear_conversation_log()
+    # Only clear nightly logs when transitioning to actual daytime (not on restart during night)
+    if not is_nighttime():
+        clear_request_log()
+        clear_conversation_log()
     log("Gatekeeper mode disabled - internet access is open")
 
 
@@ -3437,6 +3544,9 @@ def main():
     if args.test:
         success = test_gemini()
         sys.exit(0 if success else 1)
+
+    # Clean up any stale firewall rules from previous run
+    cleanup_stale_firewall_rules()
 
     if args.mode == "gatekeeper":
         enable_gatekeeper()
