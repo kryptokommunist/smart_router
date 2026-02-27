@@ -3468,8 +3468,12 @@ def teardown_firewall():
 
 def enable_gatekeeper():
     """Enable captive portal."""
+    global network_access_expiry, network_access_granted_by
     log("Enabling gatekeeper mode...")
     subprocess.run(["/etc/init.d/nodogsplash", "stop"], capture_output=True, check=False)
+    # Clear any stale network access from previous sessions
+    network_access_expiry = None
+    network_access_granted_by = None
     setup_firewall()
     kick_wifi_clients()
     # Also enable Focus Mode during nighttime to block distracting sites
