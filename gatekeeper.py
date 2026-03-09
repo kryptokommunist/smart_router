@@ -2505,14 +2505,23 @@ def grant_network_access(duration_minutes, requesting_mac):
     network_access_granted_by = requesting_mac
 
     try:
-        # Remove the REJECT rule to allow all LAN traffic
+        # Remove the REJECT rules to allow all LAN traffic
         subprocess.run(["iptables", "-t", "filter", "-D", "FORWARD", "-i", LAN_INTERFACE,
                        "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
                       capture_output=True, check=False)
+        # Remove HTTPS block
+        subprocess.run(["iptables", "-t", "filter", "-D", "FORWARD", "-i", LAN_INTERFACE,
+                       "-p", "tcp", "--dport", "443", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
+                      capture_output=True, check=False)
 
-        # Remove the HTTP redirect rule (ALL port 80 traffic, including to gateway)
+        # Remove the HTTP redirect rules
         subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_INTERFACE,
                        "-p", "tcp", "--dport", "80",
+                       "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
+                      capture_output=True, check=False)
+        # Also remove gateway-specific redirect
+        subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_INTERFACE,
+                       "-p", "tcp", "-d", GATEWAY_IP, "--dport", "80",
                        "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
                       capture_output=True, check=False)
 
@@ -2538,14 +2547,23 @@ def revoke_network_access():
     network_access_granted_by = None
 
     try:
-        # Re-add the REJECT rule to block all LAN traffic
+        # Re-add the REJECT rules to block all LAN traffic
         subprocess.run(["iptables", "-t", "filter", "-I", "FORWARD", "1", "-i", LAN_INTERFACE,
                        "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
                       check=False)
+        # Re-add HTTPS block
+        subprocess.run(["iptables", "-t", "filter", "-I", "FORWARD", "1", "-i", LAN_INTERFACE,
+                       "-p", "tcp", "--dport", "443", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
+                      check=False)
 
-        # Re-add the HTTP redirect rule (ALL port 80 traffic, including to gateway)
+        # Re-add the HTTP redirect rules
         subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", LAN_INTERFACE,
                        "-p", "tcp", "--dport", "80",
+                       "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
+                      check=False)
+        # Also add gateway-specific redirect
+        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", LAN_INTERFACE,
+                       "-p", "tcp", "-d", GATEWAY_IP, "--dport", "80",
                        "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
                       check=False)
 
@@ -2973,9 +2991,11 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
 
         # Success endpoint - returns Apple's exact success HTML to dismiss CNA
+        # ONLY if network access is actually granted
         if parsed.path == "/success":
-            # Apple's CNA looks for exactly this content to show "Done" button
-            success_html = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+            if is_network_authenticated():
+                # Apple's CNA looks for exactly this content to show "Done" button
+                success_html = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
 <HTML>
 <HEAD>
 <TITLE>Success</TITLE>
@@ -2984,7 +3004,12 @@ class GatekeeperHandler(BaseHTTPRequestHandler):
 Success
 </BODY>
 </HTML>"""
-            self.send_html(success_html)
+                self.send_html(success_html)
+            else:
+                # Not authenticated - redirect to splash page
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
             return
 
         # Stats page
@@ -3415,14 +3440,23 @@ def setup_firewall():
     # Clean up any old rules first
     teardown_firewall()
 
-    # Redirect ALL HTTP from LAN to our portal (including to gateway IP for DNS hijacking)
+    # Redirect ALL HTTP from LAN to our portal
     subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", LAN_INTERFACE,
                    "-p", "tcp", "--dport", "80",
+                   "-j", "REDIRECT", "--to-port", str(SERVER_PORT)], check=False)
+
+    # Also redirect traffic TO the gateway IP specifically (needed for direct access to router admin)
+    subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", LAN_INTERFACE,
+                   "-p", "tcp", "-d", GATEWAY_IP, "--dport", "80",
                    "-j", "REDIRECT", "--to-port", str(SERVER_PORT)], check=False)
 
     # Block all forwarding from LAN to WAN (internet) - MUST be at position 1 to be before ESTABLISHED rule
     subprocess.run(["iptables", "-t", "filter", "-I", "FORWARD", "1", "-i", LAN_INTERFACE,
                    "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"], check=False)
+
+    # Block HTTPS (port 443) from LAN - browsers default to HTTPS, must block to trigger captive portal
+    subprocess.run(["iptables", "-t", "filter", "-I", "FORWARD", "1", "-i", LAN_INTERFACE,
+                   "-p", "tcp", "--dport", "443", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"], check=False)
 
     # Allow WAN access to stats page on port 2050
     subprocess.run(["iptables", "-A", "INPUT", "-i", "eth0", "-p", "tcp", "--dport", str(SERVER_PORT),
@@ -3446,14 +3480,23 @@ def teardown_firewall():
     network_access_expiry = None
     network_access_granted_by = None
 
-    # Remove HTTP redirect (ALL port 80 traffic, including to gateway)
+    # Remove HTTP redirect (ALL port 80 traffic)
     subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_INTERFACE,
                    "-p", "tcp", "--dport", "80",
+                   "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
+                  capture_output=True, check=False)
+    # Remove gateway-specific redirect
+    subprocess.run(["iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_INTERFACE,
+                   "-p", "tcp", "-d", GATEWAY_IP, "--dport", "80",
                    "-j", "REDIRECT", "--to-port", str(SERVER_PORT)],
                   capture_output=True, check=False)
     # Remove forward block
     subprocess.run(["iptables", "-t", "filter", "-D", "FORWARD", "-i", LAN_INTERFACE,
                    "-o", "eth0", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
+                  capture_output=True, check=False)
+    # Remove HTTPS block
+    subprocess.run(["iptables", "-t", "filter", "-D", "FORWARD", "-i", LAN_INTERFACE,
+                   "-p", "tcp", "--dport", "443", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"],
                   capture_output=True, check=False)
 
     # Remove WAN access rule for stats page

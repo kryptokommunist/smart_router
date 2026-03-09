@@ -70,9 +70,11 @@ Both features have configurable durations (15 min to end-of-day).
 
 - **DNS Hijacking**: All domains resolve to router IP for captive portal detection
 - **HTTP Redirect**: Port 80 traffic redirected to Python server (port 2050)
+- **HTTPS Blocking**: Port 443 blocked to force browsers to fall back to HTTP captive portal
 - **Forward Blocking**: iptables blocks LAN→WAN until access granted
 - **External DNS Resolution**: API calls bypass local DNS hijacking via 8.8.8.8
 - **Session Management**: Time-limited access with automatic revocation
+- **Firewall State Persistence**: Rules saved to file for cleanup on restart
 
 ## Project Structure
 
@@ -98,8 +100,9 @@ smart_router/
 ├── gatekeeper_settings.json  # Focus mode domains config
 └── gatekeeper_history.json   # Permanent stats log
 /tmp/
-├── gatekeeper_requests.json  # Nightly request summaries (cleared daily)
-└── gatekeeper_conversations.json  # Full conversation logs (cleared daily)
+├── gatekeeper_requests.json       # Nightly request summaries (cleared each night)
+├── gatekeeper_conversations.json  # Full conversation logs (cleared each night)
+└── gatekeeper_firewall_state.json # Firewall rules state (for cleanup on restart)
 ```
 
 ## Quick Start
